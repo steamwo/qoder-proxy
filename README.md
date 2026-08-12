@@ -1,187 +1,143 @@
 # qoder-proxy
 
-A standalone local Go proxy that exposes a Qoder account through OpenAI- and Anthropic-compatible HTTP APIs.
+[简体中文](README.md) · [English](README_EN.md)
 
-## Supported endpoints
+将 Qoder 账号转换为本地 OpenAI / Anthropic 兼容 API 的 Go 代理，提供原生命令行与桌面客户端。
 
-- `GET /v1/models` (standard; `POST /v1/models` is accepted as a compatibility alias)
-- `POST /v1/chat/completions`
-- `POST /v1/responses`
-- `POST /v1/messages` (Anthropic Messages API)
+## 主要功能
 
-All three generation endpoints support streaming and non-streaming responses. Text generation and function/tool calls are translated through a shared internal event model.
+- OpenAI Chat Completions：`POST /v1/chat/completions`
+- OpenAI Responses：`POST /v1/responses`
+- Anthropic Messages：`POST /v1/messages`
+- 模型列表：`GET /v1/models`，兼容 `POST /v1/models`
+- 流式与非流式响应
+- Function Calling / Tool Use
+- 按模型实时能力校验 `reasoning_effort`
+- Qoder 免费账号排队重试与流式心跳
+- 可选本地 API Key
+- Windows / Linux 原生 Gio 桌面客户端，不使用 WebView
+- Windows 系统托盘、关闭后驻留、任务栏与托盘品牌图标
+- 本地结构化日志、自动限额与数据路径透明展示
 
-Per-request Qoder thinking effort is also supported and is validated against the selected model's live `thinking_config` metadata before the request is sent upstream.
+## 桌面客户端
 
-## Model name mapping
+桌面客户端提供：
 
-Qoder's model catalogue contains an internal model identifier (`key` / `model_id`) and a user-facing `display_name`.
+- Qoder 登录与退出登录
+- 账号身份、套餐和实时额度
+- 可搜索的模型能力列表
+- 代理启动、停止、运行时间与监听地址
+- 可搜索的结构化请求日志和事件详情
+- 代理、队列、本地鉴权和托盘设置
+- “数据与隐私”页面，展示账号、设置和日志的实际存储位置
 
-`qoder-proxy` deliberately keeps them separate:
+Windows 托盘支持：
 
-- `/v1/models` exposes **only `display_name`** as the OpenAI model `id`.
-- `/v1/chat/completions` accepts `display_name`, resolves it locally, and sends the real internal model ID to Qoder.
-- `/v1/responses` uses the same mapping.
-- `/v1/messages` uses the same `display_name` mapping for Anthropic clients.
-- The Qoder request headers (`X-Model-Key`) and `model_config.key` always use the internal model ID.
+- 单击或双击打开主窗口
+- 右键启动/停止代理、刷新额度、退出程序
+- 关闭主窗口后继续驻留并保持代理运行
 
-For debugging/backward compatibility, an internal model ID can also be accepted as request input when it exists in the current catalogue, but it is never returned by `/v1/models`.
+### 下载自动构建
 
-## Build
+每次推送到 `main`，GitHub Actions 都会生成：
 
-Requires Go 1.23 or newer.
+- `qoder-proxy-windows-amd64`
+- `qoder-proxy-linux-amd64`
+
+可在 [Actions](https://github.com/steamwo/qoder-proxy/actions) 页面下载。推送 `v*` 标签时会自动创建 GitHub Release，并附带两个平台的构建产物。
+
+## 快速开始：命令行
+
+需要 Go 1.23 或更高版本。
 
 ```bash
 go build -o qoder-proxy ./cmd/qoder-proxy
 ```
 
-## Login
+### 登录
 
 ```bash
 ./qoder-proxy login
 ```
 
-The command starts Qoder's PKCE device login flow, opens the authorization URL when possible, polls for completion, fetches the user identity, and stores the resulting credential locally.
-
-Use this in headless environments:
+无图形界面环境：
 
 ```bash
 ./qoder-proxy login --no-browser
 ```
 
-Credential location:
-
-- macOS: `~/Library/Application Support/qoder-proxy/credentials.json`
-- Linux: `${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/credentials.json`
-- Windows: `%AppData%\\qoder-proxy\\credentials.json`
-
-Override it with `QODER_PROXY_CREDENTIALS`.
-
-The current MVP stores the credential as a local JSON file with `0600` permissions where the OS supports Unix file modes. Do not share this file.
-
-## Run
+### 启动代理
 
 ```bash
 ./qoder-proxy serve
 ```
 
-Default address:
+默认监听：
 
 ```text
 127.0.0.1:8080
 ```
 
-Override it with either:
+指定监听地址：
 
 ```bash
 ./qoder-proxy serve --listen 127.0.0.1:9000
 ```
 
-or:
+默认只监听回环地址，避免无意中向局域网暴露服务。
 
-```bash
-QODER_PROXY_LISTEN=127.0.0.1:9000 ./qoder-proxy serve
+## 快速开始：桌面端
+
+Windows：
+
+```powershell
+./scripts/build-desktop.ps1
 ```
 
-The default loopback bind prevents accidental LAN exposure.
-
-### HTTP compatibility
-
-The local server handles browser CORS preflight (`OPTIONS`) for `/v1/*`. `GET /v1/models` is the OpenAI-standard method; `POST /v1/models` is also accepted for compatibility with clients that probe the model catalogue using POST.
-
-## Logging
-
-Server logs are written to stderr. The default level is `info` and includes server startup, completed HTTP requests, Qoder model refreshes, and Qoder upstream response status.
-
-Use debug logging when diagnosing model mapping or upstream calls:
-
-```bash
-./qoder-proxy serve --log-level debug
-```
-
-Or set it with an environment variable:
-
-```bash
-QODER_PROXY_LOG_LEVEL=debug ./qoder-proxy serve
-```
-
-Supported levels are `debug`, `info`, `warn`, `error`, and `off`. Logs intentionally omit credentials, Authorization headers, and full request bodies.
-
-Example:
+产物：
 
 ```text
-time=2026-08-11T14:25:00.000+08:00 level=INFO msg="server started" listen=127.0.0.1:8080 api_key_required=false
-time=2026-08-11T14:25:03.000+08:00 level=INFO msg="qoder models refreshed" models=8 upstream_models=8 duration_ms=241
-time=2026-08-11T14:25:08.000+08:00 level=INFO msg="qoder response" operation=chat model="Claude Sonnet 4" upstream_model=abc123 status=200 duration_ms=312
-time=2026-08-11T14:25:09.000+08:00 level=INFO msg="request completed" method=POST path=/v1/responses status=200 bytes=4210 duration_ms=1276
+dist/qoder-proxy-desktop-windows-amd64.exe
 ```
 
-### Optional local API key
-
-Set `QODER_PROXY_API_KEY` to require a local API key on generation/model endpoints:
+Linux：
 
 ```bash
-QODER_PROXY_API_KEY=local-secret ./qoder-proxy serve
+./scripts/build-desktop.sh
 ```
 
-OpenAI-compatible clients can use:
+产物：
 
 ```text
-Authorization: Bearer local-secret
+dist/qoder-proxy-desktop-linux-amd64
 ```
 
-Anthropic-compatible clients can use their normal header:
+Linux 需要 Gio 所使用的 EGL、Vulkan、Wayland 和 X11 开发依赖。详细说明见 [桌面客户端文档](docs/desktop.md)。
 
-```text
-x-api-key: local-secret
-```
+## API 使用示例
 
-## Models
-
-CLI:
-
-```bash
-./qoder-proxy models
-```
-
-HTTP:
+### 模型列表
 
 ```bash
 curl http://127.0.0.1:8080/v1/models
 ```
 
-Example response:
+`/v1/models` 返回 Qoder 的 `display_name` 作为公开模型 ID。内部 `key` / `model_id` 只用于请求 Qoder，不会通过模型列表暴露。
 
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "Claude Sonnet 4",
-      "object": "model",
-      "created": 1780000000,
-      "owned_by": "qoder"
-    }
-  ]
-}
-```
+### Chat Completions
 
-The `id` above is Qoder's `display_name`, not its internal upstream model key.
-
-## Chat Completions
-
-Non-streaming:
+非流式：
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "Claude Sonnet 4",
-    "messages": [{"role":"user","content":"hello"}]
+    "messages": [{"role":"user","content":"你好"}]
   }'
 ```
 
-Streaming:
+流式：
 
 ```bash
 curl -N http://127.0.0.1:8080/v1/chat/completions \
@@ -190,277 +146,229 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
     "model": "Claude Sonnet 4",
     "stream": true,
     "stream_options": {"include_usage": true},
-    "messages": [{"role":"user","content":"hello"}]
+    "messages": [{"role":"user","content":"你好"}]
   }'
 ```
 
-The proxy emits standard `chat.completion.chunk` SSE frames followed by `data: [DONE]`.
-
-### Thinking / reasoning effort
-
-The proxy does not hard-code which models support thinking effort. It reads each model's live Qoder `thinking_config` and rejects unsupported levels with HTTP 400 instead of silently downgrading them.
-
-OpenAI Chat Completions:
-
-```json
-{
-  "model": "DeepSeek-V4-Flash",
-  "reasoning_effort": "high",
-  "messages": [{"role":"user","content":"solve this problem"}]
-}
-```
-
-OpenAI Responses:
-
-```json
-{
-  "model": "DeepSeek-V4-Flash",
-  "reasoning": {"effort":"high"},
-  "input": "solve this problem"
-}
-```
-
-Anthropic Messages:
-
-```json
-{
-  "model": "DeepSeek-V4-Flash",
-  "max_tokens": 4096,
-  "output_config": {"effort":"high"},
-  "messages": [{"role":"user","content":"solve this problem"}]
-}
-```
-
-Accepted effort strings are determined by the Qoder model entry, commonly `low`, `medium`, `high`, `xhigh`, or `max`. `auto`/`default` means no request-level override. `off` is accepted as an alias of Qoder `none` when the model advertises a disabled-thinking mode. A model such as Kimi-K3 that does not advertise effort levels will reject `reasoning_effort`/`reasoning.effort`/`output_config.effort` rather than pretending the setting took effect.
-
-On the Qoder wire, the validated value is sent as `parameters.reasoningEffort`. Debug logging includes the selected effort and the effort levels advertised by the model, but never logs prompt content or credentials.
-
-## Anthropic Messages API
-
-The proxy also exposes Anthropic-compatible Messages at `POST /v1/messages`. The request `model` is still the Qoder `display_name`; the internal Qoder model key is never exposed to the client.
-
-Non-streaming:
-
-```bash
-curl http://127.0.0.1:8080/v1/messages \
-  -H 'Content-Type: application/json' \
-  -H 'anthropic-version: 2023-06-01' \
-  -H 'x-api-key: local-secret' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "max_tokens": 1024,
-    "messages": [{"role":"user","content":"hello"}]
-  }'
-```
-
-Streaming:
-
-```bash
-curl -N http://127.0.0.1:8080/v1/messages \
-  -H 'Content-Type: application/json' \
-  -H 'anthropic-version: 2023-06-01' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "max_tokens": 1024,
-    "stream": true,
-    "messages": [{"role":"user","content":"hello"}]
-  }'
-```
-
-Supported Anthropic message features include:
-
-- string and text-block `system` prompts
-- string and text-block user/assistant content
-- `tools` with `input_schema`
-- assistant `tool_use` history
-- user `tool_result` history
-- streaming `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, and `message_stop` events
-- Anthropic-shaped JSON errors and streaming `error` events
-- Qoder free-account queue retry/heartbeat behavior
-- Qoder no-quota errors mapped to HTTP 429 / Anthropic `rate_limit_error`
-
-`anthropic-version` and `anthropic-beta` headers are accepted for client compatibility but are not forwarded to Qoder. Image/document content blocks and Anthropic-native thinking *content blocks* are not currently translated to Qoder. Request-level `output_config.effort` is supported, and `thinking: {"type":"disabled"}` maps to Qoder's `none` mode when the selected model advertises it. `tool_choice`, `temperature`, `top_p`, and stop sequences are accepted by the public request schema, but are not forwarded to Qoder; the upstream request sends `max_tokens` plus the validated `reasoningEffort` override when present.
-
-## Responses API
-
-Non-streaming:
+### Responses
 
 ```bash
 curl http://127.0.0.1:8080/v1/responses \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "Claude Sonnet 4",
-    "input": "hello"
+    "input": "你好"
   }'
 ```
 
-Streaming:
+### Anthropic Messages
 
 ```bash
-curl -N http://127.0.0.1:8080/v1/responses \
+curl http://127.0.0.1:8080/v1/messages \
   -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
   -d '{
     "model": "Claude Sonnet 4",
-    "input": "hello",
-    "stream": true
+    "max_tokens": 1024,
+    "messages": [{"role":"user","content":"你好"}]
   }'
 ```
 
-The Responses stream emits events such as:
+## 推理强度
 
-- `response.created`
-- `response.in_progress`
-- `response.output_item.added`
-- `response.content_part.added`
-- `response.output_text.delta`
-- `response.output_text.done`
-- `response.function_call_arguments.delta`
-- `response.function_call_arguments.done`
-- `response.output_item.done`
-- `response.completed`
+项目不会硬编码哪些模型支持推理强度，而是读取 Qoder 模型列表中的实时 `thinking_config`。
 
-The external Responses event shape follows the OpenAI Responses streaming contract:
+常见值包括：
 
-- https://platform.openai.com/docs/api-reference/responses-streaming
-- https://platform.openai.com/docs/api-reference/models
+```text
+low, medium, high, xhigh, max
+```
 
-## Function calling
+`auto` / `default` 表示不覆盖默认行为；当模型提供禁用思考模式时，`off` 会映射为 Qoder 的 `none`。
 
-Chat Completions tools are passed to Qoder in OpenAI Chat tool form.
-
-Responses function tools are converted from:
+OpenAI Chat Completions：
 
 ```json
 {
-  "type": "function",
-  "name": "get_weather",
-  "description": "Get weather",
-  "parameters": {"type":"object"}
+  "model": "DeepSeek-V4-Flash",
+  "reasoning_effort": "high",
+  "messages": [{"role":"user","content":"解决这个问题"}]
 }
 ```
 
-to the Chat-style function tool shape expected by the current Qoder agent endpoint.
+OpenAI Responses：
 
-Qoder tool-call deltas are converted back to the corresponding Chat Completions or Responses streaming event format.
+```json
+{
+  "model": "DeepSeek-V4-Flash",
+  "reasoning": {"effort":"high"},
+  "input": "解决这个问题"
+}
+```
 
-Responses input also understands `function_call` and `function_call_output` items for tool-call continuation.
+Anthropic Messages：
 
-## Other commands
+```json
+{
+  "model": "DeepSeek-V4-Flash",
+  "max_tokens": 4096,
+  "output_config": {"effort":"high"},
+  "messages": [{"role":"user","content":"解决这个问题"}]
+}
+```
+
+不支持的推理级别会返回 HTTP 400，不会静默降级。
+
+## 本地 API Key
+
+通过环境变量启用本地鉴权：
 
 ```bash
-./qoder-proxy status
-./qoder-proxy logout
+QODER_PROXY_API_KEY=local-secret ./qoder-proxy serve
 ```
 
-## Environment variables
+OpenAI 客户端：
 
-| Variable | Purpose |
-| --- | --- |
-| `QODER_PROXY_LISTEN` | HTTP listen address, default `127.0.0.1:8080` |
-| `QODER_PROXY_API_KEY` | Optional local Bearer API key |
-| `QODER_PROXY_CREDENTIALS` | Override credential JSON path |
-| `QODER_PROXY_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error`, `off` |
-| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Standard Go HTTP proxy environment variables |
-
-## Current scope
-
-The first version focuses on the local single-account use case:
-
-- one Qoder credential
-- Qoder PKCE device login
-- COSY request signing
-- Qoder model discovery with a five-minute in-memory cache
-- public `display_name` / private upstream model ID mapping
-- text input/output
-- function calling
-- OpenAI Chat Completions and Responses streaming/non-streaming output
-
-Cloudflare Workers, D1, KV, account pools, multi-provider routing, gateway quotas, and admin UI are intentionally not part of this project.
-
-Multimodal Responses input is not translated in the MVP; text content is supported.
-
-
-## Qoder no-quota errors
-
-Qoder business error `112` is treated as an exhausted/unavailable account quota.
-The proxy does not retry it. If it is the first upstream SSE event, the proxy
-returns an OpenAI-style JSON error before starting the local SSE response:
-
-```http
-HTTP/1.1 429 Too Many Requests
-Content-Type: application/json
+```text
+Authorization: Bearer local-secret
 ```
 
-```json
-{
-  "error": {
-    "message": "Qoder account has no available quota for this request. Pricing: https://qoder.com/pricing?client=qoder",
-    "type": "insufficient_quota",
-    "code": "insufficient_quota"
-  }
-}
+Anthropic 客户端：
+
+```text
+x-api-key: local-secret
 ```
 
-This is separate from Qoder queue code `10605`, which remains automatically
-retryable according to the queue settings below.
+## 数据存储位置
 
-## Qoder free-account queue handling
+### 账号凭据
 
-Qoder may put free-tier requests into a slow queue and return a business-layer
-403 envelope with code `10605`, `isQueued: true`, and a suggested
-`retryAfterSeconds` value even though the HTTP response itself is 200.
+- Windows：`%AppData%\qoder-proxy\credentials.json`
+- Linux：`${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/credentials.json`
+- macOS：`~/Library/Application Support/qoder-proxy/credentials.json`
 
-qoder-proxy detects this condition before exposing it as an OpenAI error. It
-waits for the server-provided retry interval and reissues a freshly signed
-Qoder request. For streaming `/v1/chat/completions`, the proxy emits SSE comment
-heartbeats while queued so browser/client idle timers do not treat the local
-connection as dead.
+通过 `QODER_PROXY_CREDENTIALS` 可以覆盖默认路径。账号文件包含访问令牌，请勿共享。
 
-Defaults:
+### 桌面配置
+
+- Windows：`%AppData%\qoder-proxy\desktop.json`
+- Linux：`${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/desktop.json`
+
+### 桌面日志
+
+- Windows：`%LocalAppData%\qoder-proxy\logs\desktop.log`
+- Linux：`${XDG_CACHE_HOME:-~/.cache}/qoder-proxy/logs/desktop.log`
+
+桌面日志自动限制为 4 MB。“清空日志”会同时清除内存和磁盘内容。日志不会记录凭据、Authorization 头或完整请求正文。
+
+## Qoder 排队和额度错误
+
+### 免费账号排队
+
+Qoder 可能返回业务码 `10605`、`isQueued: true` 和建议的 `retryAfterSeconds`。代理会：
+
+- 等待服务端建议的时间
+- 重新签名并重试请求
+- 对流式 Chat Completions 发送 SSE 注释心跳，避免客户端空闲超时
+
+默认配置：
 
 ```text
 --queue-retries 20
 --queue-max-wait 10m
 ```
 
-Environment equivalents:
+### 额度不足
+
+Qoder 业务码 `112` 会映射为 HTTP 429，并返回 OpenAI / Anthropic 对应格式的额度错误。额度不足不会进入排队重试。
+
+## 日志
+
+命令行日志默认输出到 stderr，支持以下级别：
 
 ```text
-QODER_PROXY_QUEUE_RETRIES=20
-QODER_PROXY_QUEUE_MAX_WAIT=10m
+debug, info, warn, error, off
 ```
 
-Set `--queue-retries 0` to disable automatic queue retries.
-
-
-## Desktop UI refresh
-
-The Gio desktop client uses a light, Apple-inspired native visual system: generous spacing, cool gray surfaces, restrained blue/mint status colors, rounded elevated panels, and a status-first information hierarchy. Five dedicated areas cover Dashboard, account quota, models, structured logs, and settings. The UI remains native Gio and does not use WebView.
-
-## Desktop app (Gio, no WebView)
-
-Version `0.3.2-desktop` adds an optional native-rendered Gio desktop application while keeping the CLI intact.
-
-```text
-cmd/qoder-proxy            CLI
-cmd/qoder-proxy-desktop    Gio desktop app
-internal/...               shared proxy/Qoder implementation
-```
-
-The desktop app provides Qoder login/logout, account quota, searchable model capabilities, proxy start/stop with uptime, bounded persistent searchable logs with detail selection, grouped settings, a Data & Privacy view that reveals actual local paths, and platform tray integration. Windows uses a Win32 notification-area menu with open/start-stop/refresh/quit actions; Linux uses StatusNotifierItem over D-Bus with activate-to-open and secondary-activate-to-toggle behavior.
-
-Qoder quota is fetched with the logged-in Bearer token from `https://openapi.qoder.sh/api/v2/quota/usage`. The UI recognizes personal quota (`userQuota`), organization resources (`orgResourcePackage`), plan/subscription labels, percentages, and quota expiry/reset timestamps.
-
-Build instructions are in [`docs/desktop.md`](docs/desktop.md). On a normal development machine with Go module network access:
-
-```powershell
-./scripts/build-desktop.ps1
-
-The desktop build script runs `go mod tidy` first to generate/update `go.sum`, and aborts on any failed Go command.
-```
-
-or on Linux:
+启用调试日志：
 
 ```bash
-./scripts/build-desktop.sh
+./qoder-proxy serve --log-level debug
 ```
+
+或：
+
+```bash
+QODER_PROXY_LOG_LEVEL=debug ./qoder-proxy serve
+```
+
+## 环境变量
+
+| 变量 | 作用 |
+| --- | --- |
+| `QODER_PROXY_LISTEN` | HTTP 监听地址，默认 `127.0.0.1:8080` |
+| `QODER_PROXY_API_KEY` | 可选的本地 Bearer API Key |
+| `QODER_PROXY_CREDENTIALS` | 覆盖账号凭据 JSON 路径 |
+| `QODER_PROXY_LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error`、`off` |
+| `QODER_PROXY_QUEUE_RETRIES` | 免费账号排队重试次数 |
+| `QODER_PROXY_QUEUE_MAX_WAIT` | 排队总等待上限 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Go 标准 HTTP 代理变量 |
+
+## 其他命令
+
+```bash
+./qoder-proxy models
+./qoder-proxy status
+./qoder-proxy logout
+```
+
+## 自动构建与发布
+
+[GitHub Actions 工作流](.github/workflows/build.yml)会在以下情况运行：
+
+- 推送到 `main`
+- 创建或更新面向 `main` 的 Pull Request
+- 手动触发 `workflow_dispatch`
+- 推送 `v*` 标签
+
+工作流执行：
+
+1. `go test ./...`
+2. `go vet ./...`
+3. 构建无控制台窗口、带品牌图标的 Windows GUI 程序
+4. 安装 Gio 原生依赖并构建 Linux 程序
+5. 上传两个平台的 Artifact
+6. 对 `v*` 标签自动创建 GitHub Release
+
+## 项目结构
+
+```text
+cmd/qoder-proxy            命令行程序
+cmd/qoder-proxy-desktop    Gio 桌面客户端
+internal/qoder             Qoder 鉴权、签名、模型、额度与流式协议
+internal/openai            OpenAI Chat Completions / Responses 适配
+internal/anthropic         Anthropic Messages 适配
+internal/server            HTTP 服务
+internal/desktop           桌面端代理、设置、日志与托盘
+assets                     桌面品牌图标
+```
+
+更多资料：
+
+- [桌面端构建和数据路径](docs/desktop.md)
+- [项目架构](docs/architecture.md)
+- [设计说明](docs/design.md)
+
+## 当前范围
+
+当前版本聚焦本地单账号使用：
+
+- 单个 Qoder 凭据
+- Qoder PKCE 设备登录
+- COSY 请求签名
+- 模型发现与缓存
+- 文本输入输出
+- Function Calling / Tool Use
+- OpenAI 与 Anthropic 流式/非流式兼容
+
+多账号池、Cloudflare Workers、D1、KV、网关额度和多供应商路由暂不属于当前范围。
