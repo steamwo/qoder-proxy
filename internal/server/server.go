@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steamwo/qoder-proxy/internal/anthropic"
@@ -16,27 +17,61 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/qoder"
 )
 
+// Backend shares model defaults across every public protocol adapter.
+// Backend 在所有公开协议适配器之间共享模型默认值。
 type Backend struct {
-	Registry *qoder.Registry
-	Qoder    *qoder.Client
+	Registry               *qoder.Registry
+	Qoder                  *qoder.Client
+	defaultsMu             sync.RWMutex
+	modelReasoningDefaults map[string]string
 }
 
+// ResolveModel attaches the stable-ID default after live discovery so stale values are revalidated downstream.
+// ResolveModel 在实时发现后附加稳定 ID 默认值，使过期值仍会在下游重新校验。
 func (b *Backend) ResolveModel(ctx context.Context, name string) (qoder.Model, error) {
-	return b.Registry.Resolve(ctx, name)
+	model, err := b.Registry.Resolve(ctx, name)
+	if err != nil {
+		return qoder.Model{}, err
+	}
+	b.defaultsMu.RLock()
+	model.DefaultReasoningEffort = b.modelReasoningDefaults[model.UpstreamID]
+	b.defaultsMu.RUnlock()
+	return model, nil
 }
+
+// SetModelReasoningDefaults replaces one immutable snapshot so live desktop changes are race-free.
+// SetModelReasoningDefaults 替换一份不可变快照，使桌面端实时修改不会产生数据竞争。
+func (b *Backend) SetModelReasoningDefaults(defaults map[string]string) {
+	cloned := make(map[string]string, len(defaults))
+	for modelID, effort := range defaults {
+		cloned[modelID] = effort
+	}
+	b.defaultsMu.Lock()
+	b.modelReasoningDefaults = cloned
+	b.defaultsMu.Unlock()
+}
+
+// Chat keeps the protocol boundary thin so one upstream client owns request behavior.
+// Chat 保持协议边界精简，由单一上游客户端统一请求行为。
 func (b *Backend) Chat(ctx context.Context, req protocol.Request) (*http.Response, error) {
 	return b.Qoder.Chat(ctx, req)
 }
 
+// ChatWithQueue preserves queue callbacks without duplicating retry policy in adapters.
+// ChatWithQueue 保留排队回调，避免各适配器重复重试策略。
 func (b *Backend) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(qoder.QueueInfo) error) (*http.Response, error) {
 	return b.Qoder.ChatWithQueue(ctx, req, onQueue)
 }
 
+// Server owns the public handler and authentication configuration.
+// Server 管理公开处理器与认证配置。
 type Server struct {
 	Backend *Backend
 	APIKey  string
 }
 
+// New creates a server without desktop-only defaults so CLI behavior stays unchanged.
+// New 创建不含桌面专属默认值的服务，确保 CLI 行为不变。
 func New(httpClient *http.Client, cred credential.Credential, apiKey string) *Server {
 	return &Server{Backend: &Backend{Registry: qoder.NewRegistry(httpClient, cred), Qoder: qoder.NewClient(httpClient, cred)}, APIKey: apiKey}
 }

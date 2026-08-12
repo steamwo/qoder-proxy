@@ -64,6 +64,8 @@ func (c *Client) Chat(ctx context.Context, req protocol.Request) (*http.Response
 	return c.ChatWithQueue(ctx, req, nil)
 }
 
+// ChatWithQueue preserves one final effort value across retries so every attempt is observable and equivalent.
+// ChatWithQueue 在重试期间保持同一个最终思考等级，使每次尝试都可观测且语义一致。
 func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(QueueInfo) error) (*http.Response, error) {
 	policy := c.QueueRetry
 	if policy.MaxRetries < 0 {
@@ -97,6 +99,7 @@ func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueu
 		slog.Info("qoder queued",
 			"model", req.PublicModel,
 			"upstream_model", req.ModelID,
+			"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
 			"attempt", attempt+1,
 			"queue_type", info.QueueType,
 			"queue_count", info.QueueCount,
@@ -133,6 +136,8 @@ func waitContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// doChatAttempt emits the final normalized effort beside both upstream request and response events.
+// doChatAttempt 在上游请求与响应事件中同时记录最终规范化后的思考等级。
 func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http.Response, error) {
 	// Keep model_config byte-for-byte semantically aligned with CFlareAIProxy:
 	// when model discovery returned a config object, pass that object back to
@@ -252,7 +257,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 		"last_user_bytes", len(req.LastUserText),
 		"tools", len(tools),
 		"max_tokens", maxTokens,
-		"reasoning_effort", req.ReasoningEffort,
+		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
 		"supported_reasoning_efforts", reasoningEfforts(modelConfig),
 		"reasoning_disabled_supported", reasoningDisabled(modelConfig),
 		"model_config_keys", sortedKeys(modelConfig),
@@ -261,13 +266,14 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 	)
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
-		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, err
 	}
 	slog.Info("qoder response",
 		"operation", "chat",
 		"model", req.PublicModel,
 		"upstream_model", req.ModelID,
+		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
 		"status", resp.StatusCode,
 		"duration_ms", time.Since(started).Milliseconds(),
 		"content_type", resp.Header.Get("Content-Type"),
@@ -278,10 +284,19 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		message := strings.TrimSpace(string(data))
-		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "status", resp.StatusCode, "body", truncateRunes(message, 1000))
+		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
 		return nil, fmt.Errorf("qoder chat returned HTTP %d: %s", resp.StatusCode, message)
 	}
 	return resp, nil
+}
+
+// effectiveReasoningLabel makes the upstream automatic behavior explicit instead of leaving logs blank.
+// effectiveReasoningLabel 将上游自动行为明确标为 auto，避免日志留空造成歧义。
+func effectiveReasoningLabel(effort string) string {
+	if strings.TrimSpace(effort) == "" {
+		return "auto"
+	}
+	return effort
 }
 
 func messageRoles(messages []map[string]any) []string {

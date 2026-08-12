@@ -11,19 +11,20 @@ import (
 	"time"
 )
 
-// LogEntry is a UI-friendly view of one structured slog line. The original
-// line is kept so the details panel never hides information from operators.
+// LogEntry is a UI-friendly structured view that keeps the raw line for complete diagnostics.
+// LogEntry 是便于界面展示的结构化视图，同时保留原始行以提供完整诊断信息。
 type LogEntry struct {
-	Time       time.Time
-	Level      string
-	Message    string
-	Method     string
-	Path       string
-	Model      string
-	Status     int
-	DurationMS int64
-	Remote     string
-	Raw        string
+	Time            time.Time
+	Level           string
+	Message         string
+	Method          string
+	Path            string
+	Model           string
+	ReasoningEffort string
+	Status          int
+	DurationMS      int64
+	Remote          string
+	Raw             string
 }
 
 type LogStats struct {
@@ -175,8 +176,8 @@ func (l *LogBuffer) Close() error {
 	return err
 }
 
-// Entries returns newest entries first. It understands the stable key/value
-// shape emitted by slog.TextHandler and gracefully falls back to the raw line.
+// Entries returns newest entries first and extracts fields needed for at-a-glance request diagnosis.
+// Entries 按最新优先返回日志，并提取快速诊断请求所需的字段。
 func (l *LogBuffer) Entries(limit int) []LogEntry {
 	l.mu.RLock()
 	text := l.b.String()
@@ -192,13 +193,14 @@ func (l *LogBuffer) Entries(limit int) []LogEntry {
 			continue
 		}
 		e := LogEntry{
-			Raw:     line,
-			Level:   valueFor(line, "level"),
-			Message: valueFor(line, "msg"),
-			Method:  valueFor(line, "method"),
-			Path:    valueFor(line, "path"),
-			Model:   firstValue(valueFor(line, "model"), valueFor(line, "display_name")),
-			Remote:  valueFor(line, "remote"),
+			Raw:             line,
+			Level:           valueFor(line, "level"),
+			Message:         valueFor(line, "msg"),
+			Method:          valueFor(line, "method"),
+			Path:            valueFor(line, "path"),
+			Model:           firstValue(valueFor(line, "model"), valueFor(line, "display_name")),
+			ReasoningEffort: valueFor(line, "reasoning_effort"),
+			Remote:          valueFor(line, "remote"),
 		}
 		e.Time, _ = time.Parse(time.RFC3339Nano, valueFor(line, "time"))
 		e.Status, _ = strconv.Atoi(valueFor(line, "status"))

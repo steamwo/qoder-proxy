@@ -69,6 +69,7 @@ type appState struct {
 	trayStatusBtn, trayToggleBtn, trayRefreshBtn                      widget.Clickable
 	modelList, logList, pageList, settingsList                        widget.List
 	modelRows, logRows                                                []widget.Clickable
+	modelEffortBtns                                                   []widget.Clickable
 	selectedModel, selectedLog                                        int
 	trayPopover                                                       bool
 	logEditor                                                         widget.Editor
@@ -490,14 +491,18 @@ func (s *appState) saveSettings() {
 		s.setNotice("queue max wait 格式无效，例如 10m")
 		return
 	}
+	s.mu.RLock()
+	reasoningDefaults := cloneModelDefaults(s.settings.ModelReasoningDefaults)
+	s.mu.RUnlock()
 	ns := desktop.Settings{
-		Listen:            strings.TrimSpace(s.listenEditor.Text()),
-		APIKey:            s.apiKeyEditor.Text(),
-		QueueRetries:      retries,
-		QueueMaxWait:      maxWait,
-		AutoStart:         s.autoStart.Value,
-		MinimizeToTray:    s.minimizeToTray.Value,
-		TrayNotifications: s.trayNotifications.Value,
+		Listen:                 strings.TrimSpace(s.listenEditor.Text()),
+		APIKey:                 s.apiKeyEditor.Text(),
+		QueueRetries:           retries,
+		QueueMaxWait:           maxWait,
+		AutoStart:              s.autoStart.Value,
+		MinimizeToTray:         s.minimizeToTray.Value,
+		TrayNotifications:      s.trayNotifications.Value,
+		ModelReasoningDefaults: reasoningDefaults,
 	}
 	if err := desktop.SaveSettings(ns); err != nil {
 		s.setNotice("保存设置失败: " + err.Error())
@@ -507,4 +512,45 @@ func (s *appState) saveSettings() {
 	s.settings = ns
 	s.mu.Unlock()
 	s.setNotice("设置已保存；监听地址/API Key 的修改会在下次启动代理时生效")
+}
+
+// cloneModelDefaults creates a private snapshot because settings may be read by background refreshes.
+// cloneModelDefaults 创建私有快照，因为后台刷新可能同时读取设置。
+func cloneModelDefaults(source map[string]string) map[string]string {
+	cloned := make(map[string]string, len(source))
+	for modelID, effort := range source {
+		cloned[modelID] = effort
+	}
+	return cloned
+}
+
+// saveModelReasoningDefault persists one validated choice and updates a running proxy immediately.
+// saveModelReasoningDefault 持久化单个已校验选项，并立即更新运行中的代理。
+func (s *appState) saveModelReasoningDefault(model qoder.Model, effort string) {
+	if effort != "" {
+		if _, err := model.NormalizeReasoningEffort(effort); err != nil {
+			s.setNotice("无法设置默认思考等级: " + err.Error())
+			return
+		}
+	}
+	s.mu.RLock()
+	next := s.settings
+	next.ModelReasoningDefaults = cloneModelDefaults(s.settings.ModelReasoningDefaults)
+	s.mu.RUnlock()
+	// Empty means automatic and should not leave redundant entries in the local configuration.
+	// 空值表示自动，不应在本地配置中留下冗余条目。
+	if effort == "" {
+		delete(next.ModelReasoningDefaults, model.UpstreamID)
+	} else {
+		next.ModelReasoningDefaults[model.UpstreamID] = effort
+	}
+	if err := desktop.SaveSettings(next); err != nil {
+		s.setNotice("保存默认思考等级失败: " + err.Error())
+		return
+	}
+	s.mu.Lock()
+	s.settings = next
+	s.mu.Unlock()
+	s.proxy.UpdateModelReasoningDefaults(next.ModelReasoningDefaults)
+	s.setNotice(fmt.Sprintf("%s 的默认思考等级已设为 %s", model.DisplayName, reasoningEffortLabel(effort)))
 }

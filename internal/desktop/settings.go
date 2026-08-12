@@ -8,18 +8,23 @@ import (
 	"time"
 )
 
+// Settings is the durable desktop product configuration, including per-model behavior keyed by upstream ID.
+// Settings 是桌面产品的持久配置，模型行为按上游 ID 存储。
 type Settings struct {
-	Listen            string `json:"listen"`
-	APIKey            string `json:"api_key,omitempty"`
-	QueueRetries      int    `json:"queue_retries"`
-	QueueMaxWait      string `json:"queue_max_wait"`
-	AutoStart         bool   `json:"auto_start"`
-	MinimizeToTray    bool   `json:"minimize_to_tray"`
-	TrayNotifications bool   `json:"tray_notifications"`
+	Listen                 string            `json:"listen"`
+	APIKey                 string            `json:"api_key,omitempty"`
+	QueueRetries           int               `json:"queue_retries"`
+	QueueMaxWait           string            `json:"queue_max_wait"`
+	AutoStart              bool              `json:"auto_start"`
+	MinimizeToTray         bool              `json:"minimize_to_tray"`
+	TrayNotifications      bool              `json:"tray_notifications"`
+	ModelReasoningDefaults map[string]string `json:"model_reasoning_defaults,omitempty"`
 }
 
+// DefaultSettings initializes maps eagerly so first-run model choices can be saved safely.
+// DefaultSettings 预先初始化映射，确保首次运行即可安全保存模型选项。
 func DefaultSettings() Settings {
-	return Settings{Listen: "127.0.0.1:9000", QueueRetries: 20, QueueMaxWait: "10m", AutoStart: true, MinimizeToTray: true, TrayNotifications: true}
+	return Settings{Listen: "127.0.0.1:9000", QueueRetries: 20, QueueMaxWait: "10m", AutoStart: true, MinimizeToTray: true, TrayNotifications: true, ModelReasoningDefaults: map[string]string{}}
 }
 
 // SettingsPath exposes the resolved file location so users can inspect their local data.
@@ -53,6 +58,11 @@ func LoadSettings() Settings {
 	}
 	if _, e := time.ParseDuration(s.QueueMaxWait); e != nil {
 		s.QueueMaxWait = "10m"
+	}
+	// Older configuration files omit the map; normalize them before the UI mutates it.
+	// 旧配置文件没有此映射；在界面修改前先将其规范化。
+	if s.ModelReasoningDefaults == nil {
+		s.ModelReasoningDefaults = map[string]string{}
 	}
 	return s
 }

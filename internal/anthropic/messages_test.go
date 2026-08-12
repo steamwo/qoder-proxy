@@ -269,3 +269,23 @@ func TestMessagesThinkingDisabledMapsToNone(t *testing.T) {
 		t.Fatalf("reasoning effort=%q", backend.last.ReasoningEffort)
 	}
 }
+
+// TestMessagesUsesModelDefaultEffort verifies Anthropic omission matches OpenAI protocol behavior.
+// TestMessagesUsesModelDefaultEffort 验证 Anthropic 省略值与 OpenAI 协议行为一致。
+func TestMessagesUsesModelDefaultEffort(t *testing.T) {
+	backend := &fakeBackend{
+		model: qoder.Model{
+			UpstreamID: "reason-id", DisplayName: "Reason Model", DefaultReasoningEffort: "high",
+			Raw: map[string]any{"thinking_config": map[string]any{"enabled": map[string]any{"efforts": map[string]any{"high": map[string]any{}}}}},
+		},
+		body: qoderFrame(`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`) + "data: [DONE]\n\n",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"Reason Model","max_tokens":64,"messages":[{"role":"user","content":"hi"}]
+	}`))
+	rr := httptest.NewRecorder()
+	HandleMessages(rr, req, backend)
+	if rr.Code != http.StatusOK || backend.last.ReasoningEffort != "high" {
+		t.Fatalf("status=%d effort=%q body=%s", rr.Code, backend.last.ReasoningEffort, rr.Body.String())
+	}
+}

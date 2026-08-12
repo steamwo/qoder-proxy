@@ -14,6 +14,8 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/server"
 )
 
+// ProxyManager owns one live server and its mutable desktop policy snapshot.
+// ProxyManager 管理单个运行中服务及其可变的桌面策略快照。
 type ProxyManager struct {
 	mu      sync.RWMutex
 	srv     *http.Server
@@ -21,6 +23,7 @@ type ProxyManager struct {
 	running bool
 	addr    string
 	started time.Time
+	backend *server.Backend
 }
 
 func (p *ProxyManager) Running() bool { p.mu.RLock(); defer p.mu.RUnlock(); return p.running }
@@ -33,6 +36,9 @@ func (p *ProxyManager) Uptime() time.Duration {
 	}
 	return time.Since(p.started)
 }
+
+// Start applies the durable model defaults to the server instance created for this proxy run.
+// Start 将持久化的模型默认值应用到本次代理运行所创建的服务实例。
 func (p *ProxyManager) Start(cred credential.Credential, s Settings) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -44,6 +50,7 @@ func (p *ProxyManager) Start(cred credential.Credential, s Settings) error {
 		return err
 	}
 	app := server.New(http.DefaultClient, cred, s.APIKey)
+	app.Backend.SetModelReasoningDefaults(s.ModelReasoningDefaults)
 	maxWait, _ := time.ParseDuration(s.QueueMaxWait)
 	if maxWait <= 0 {
 		maxWait = 10 * time.Minute
@@ -55,6 +62,7 @@ func (p *ProxyManager) Start(cred credential.Credential, s Settings) error {
 	p.running = true
 	p.addr = ln.Addr().String()
 	p.started = time.Now()
+	p.backend = app.Backend
 	slog.Info("desktop proxy started", "listen", p.addr, "queue_retries", s.QueueRetries, "queue_max_wait", maxWait)
 	go func() {
 		err := srv.Serve(ln)
@@ -67,6 +75,20 @@ func (p *ProxyManager) Start(cred credential.Credential, s Settings) error {
 	}()
 	return nil
 }
+
+// UpdateModelReasoningDefaults applies saved choices without interrupting active connections.
+// UpdateModelReasoningDefaults 无需中断现有连接即可应用已保存的选择。
+func (p *ProxyManager) UpdateModelReasoningDefaults(defaults map[string]string) {
+	p.mu.RLock()
+	backend := p.backend
+	p.mu.RUnlock()
+	if backend != nil {
+		backend.SetModelReasoningDefaults(defaults)
+	}
+}
+
+// Stop clears the live backend reference so later settings edits cannot target a stopped server.
+// Stop 清除运行中后端引用，避免后续设置修改作用到已停止的服务。
 func (p *ProxyManager) Stop(ctx context.Context) error {
 	p.mu.Lock()
 	srv := p.srv
@@ -79,6 +101,7 @@ func (p *ProxyManager) Stop(ctx context.Context) error {
 	p.running = false
 	p.srv = nil
 	p.ln = nil
+	p.backend = nil
 	p.started = time.Time{}
 	p.mu.Unlock()
 	slog.Info("desktop proxy stopped")

@@ -618,6 +618,8 @@ func quotaMeter(gtx layout.Context, th *material.Theme, quota *qoder.QuotaWindow
 	)
 }
 
+// modelsPage keeps capability discovery and per-model defaults in one focused workspace.
+// modelsPage 将能力发现与逐模型默认值集中在同一工作区。
 func (s *appState) modelsPage(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	s.mu.RLock()
 	models, errText := append([]qoder.Model(nil), s.models...), s.modelsErr
@@ -664,7 +666,7 @@ func (s *appState) modelsPage(gtx layout.Context, th *material.Theme) layout.Dim
 					if index < 0 || index >= len(models) {
 						index = 0
 					}
-					return modelInspector(gtx, th, models[index])
+					return s.modelInspector(gtx, th, models[index])
 				}),
 			)
 		}),
@@ -734,11 +736,29 @@ func modelRow(gtx layout.Context, th *material.Theme, model qoder.Model, selecte
 	})
 }
 
-func modelInspector(gtx layout.Context, th *material.Theme, model qoder.Model) layout.Dimensions {
+// modelInspector combines live capabilities with a durable per-model default at the point of decision.
+// modelInspector 在用户决策位置结合实时能力与持久化的逐模型默认值。
+func (s *appState) modelInspector(gtx layout.Context, th *material.Theme, model qoder.Model) layout.Dimensions {
 	efforts := model.SupportedReasoningEfforts()
 	thinking := "不支持"
 	if len(efforts) > 0 {
 		thinking = strings.Join(efforts, " · ")
+	}
+	options := []string{""}
+	if model.SupportsReasoningDisabled() {
+		options = append(options, "none")
+	}
+	options = append(options, efforts...)
+	ensureClickables(&s.modelEffortBtns, len(options))
+	s.mu.RLock()
+	selectedEffort := s.settings.ModelReasoningDefaults[model.UpstreamID]
+	s.mu.RUnlock()
+	// Invalid saved values behave and appear as automatic after live capabilities change.
+	// 实时能力变化后，无效的已保存值在行为与展示上都回退为自动。
+	if selectedEffort != "" {
+		if normalized, err := model.NormalizeReasoningEffort(selectedEffort); err != nil || normalized == "" {
+			selectedEffort = ""
+		}
 	}
 	return card(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
@@ -763,12 +783,77 @@ func modelInspector(gtx layout.Context, th *material.Theme, model qoder.Model) l
 			}),
 			layout.Rigid(layout.Spacer{Height: 12}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return keyValue(gtx, th, "推理级别", thinking) }),
-			layout.Rigid(layout.Spacer{Height: 18}.Layout),
+			layout.Rigid(layout.Spacer{Height: 16}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return bodyLabel(gtx, th, "默认思考等级", ui.text, 13)
+			}),
+			layout.Rigid(layout.Spacer{Height: 4}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return bodyLabel(gtx, th, "请求未指定时使用；显式值优先", ui.faint, 11)
+			}),
+			layout.Rigid(layout.Spacer{Height: 8}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, reasoningOptionChildren(th, s, model, options, selectedEffort)...)
+			}),
+			layout.Rigid(layout.Spacer{Height: 16}.Layout),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return statusPill(gtx, th, "当前可用", ui.success, ui.successSoft)
 			}),
 		)
 	})
+}
+
+// reasoningOptionChildren uses stable clickables because Gio routes clicks on the following frame.
+// reasoningOptionChildren 使用稳定的点击状态，因为 Gio 会在后续帧分发点击事件。
+func reasoningOptionChildren(th *material.Theme, s *appState, model qoder.Model, options []string, selected string) []layout.FlexChild {
+	children := make([]layout.FlexChild, 0, len(options)*2)
+	for index, effort := range options {
+		index, effort := index, effort
+		if index > 0 {
+			children = append(children, layout.Rigid(layout.Spacer{Height: 6}.Layout))
+		}
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if s.modelEffortBtns[index].Clicked(gtx) {
+				s.saveModelReasoningDefault(model, effort)
+			}
+			active := selected == effort
+			background, foreground := ui.mutedPanel, ui.muted
+			if active {
+				background, foreground = ui.accentSoft, ui.accent
+			}
+			return roundedBackground(gtx, background, 9, func(gtx layout.Context) layout.Dimensions {
+				return s.modelEffortBtns[index].Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Top: 7, Bottom: 7, Left: 10, Right: 10}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return bodyLabel(gtx, th, reasoningEffortLabel(effort), foreground, 12)
+					})
+				})
+			})
+		}))
+	}
+	return children
+}
+
+// reasoningEffortLabel keeps protocol values stable while presenting concise Chinese product language.
+// reasoningEffortLabel 保持协议值稳定，同时展示简洁的中文产品文案。
+func reasoningEffortLabel(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "":
+		return "自动（跟随上游）"
+	case "none":
+		return "关闭"
+	case "minimal":
+		return "最小 · minimal"
+	case "low":
+		return "低 · low"
+	case "medium":
+		return "中 · medium"
+	case "high":
+		return "高 · high"
+	case "max", "xhigh":
+		return "最高 · " + effort
+	default:
+		return effort
+	}
 }
 
 // logsPage presents the searchable recent tail while making disk persistence explicit.
@@ -856,6 +941,8 @@ func (s *appState) logsPage(gtx layout.Context, th *material.Theme) layout.Dimen
 	)
 }
 
+// logHeader exposes reasoning beside the model because both define upstream behavior.
+// logHeader 将思考等级放在模型旁，因为二者共同决定上游行为。
 func logHeader(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	return layout.Inset{Bottom: 10}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{}.Layout(gtx,
@@ -864,11 +951,14 @@ func logHeader(gtx layout.Context, th *material.Theme) layout.Dimensions {
 			layout.Flexed(.55, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "方法", ui.faint, 12) }),
 			layout.Flexed(1.45, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "路径 / 事件", ui.faint, 12) }),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "模型", ui.faint, 12) }),
+			layout.Flexed(.7, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "思考等级", ui.faint, 12) }),
 			layout.Flexed(.65, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "耗时", ui.faint, 12) }),
 		)
 	})
 }
 
+// logTableRow shows the final upstream effort rather than the raw client preference.
+// logTableRow 展示最终上游思考等级，而不是客户端原始偏好。
 func logTableRow(gtx layout.Context, th *material.Theme, entry desktop.LogEntry, selected bool) layout.Dimensions {
 	bg := color.NRGBA{}
 	if selected {
@@ -896,17 +986,26 @@ func logTableRow(gtx layout.Context, th *material.Theme, entry desktop.LogEntry,
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return bodyLabel(gtx, th, first(entry.Model, "—"), ui.muted, 12)
 				}),
+				layout.Flexed(.7, func(gtx layout.Context) layout.Dimensions {
+					return bodyLabel(gtx, th, first(entry.ReasoningEffort, "—"), ui.muted, 12)
+				}),
 				layout.Flexed(.65, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, duration, ui.muted, 12) }),
 			)
 		})
 	})
 }
 
+// logDetails surfaces the parsed effort before the raw line so operators can verify it quickly.
+// logDetails 将解析后的思考等级置于原始行之前，便于运维人员快速核对。
 func logDetails(gtx layout.Context, th *material.Theme, entry desktop.LogEntry) layout.Dimensions {
 	return roundedBackground(gtx, ui.mutedPanel, 12, func(gtx layout.Context) layout.Dimensions {
 		return layout.Inset{Top: 12, Bottom: 12, Left: 14, Right: 14}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "请求详情", ui.text, 13) }),
+				layout.Rigid(layout.Spacer{Height: 6}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return keyValue(gtx, th, "最终思考等级", first(entry.ReasoningEffort, "未记录"))
+				}),
 				layout.Rigid(layout.Spacer{Height: 8}.Layout),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					l := material.Caption(th, entry.Raw)

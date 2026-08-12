@@ -99,3 +99,18 @@ func TestNormalizeResponsesReasoningEffort(t *testing.T) {
 		t.Fatalf("reasoning effort=%q", got.ReasoningEffort)
 	}
 }
+
+// TestNormalizeProtocolsUseModelDefault verifies Chat and Responses share the same omission semantics.
+// TestNormalizeProtocolsUseModelDefault 验证 Chat 与 Responses 对省略值采用相同语义。
+func TestNormalizeProtocolsUseModelDefault(t *testing.T) {
+	model := reasoningModel()
+	model.DefaultReasoningEffort = "high"
+	chat, err := NormalizeChat(ChatRequest{Model: model.DisplayName, Messages: []map[string]any{{"role": "user", "content": "solve"}}}, model)
+	if err != nil || chat.ReasoningEffort != "high" {
+		t.Fatalf("chat effort=%q err=%v", chat.ReasoningEffort, err)
+	}
+	responses, err := NormalizeResponses(ResponsesRequest{Model: model.DisplayName, Input: json.RawMessage(`"solve"`)}, model)
+	if err != nil || responses.ReasoningEffort != "high" {
+		t.Fatalf("responses effort=%q err=%v", responses.ReasoningEffort, err)
+	}
+}

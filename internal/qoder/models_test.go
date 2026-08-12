@@ -67,3 +67,36 @@ func TestModelWithoutThinkingConfigRejectsEffort(t *testing.T) {
 		t.Fatal("expected configurable reasoning error")
 	}
 }
+
+// TestModelDefaultReasoningEffort verifies omission uses the saved default while explicit input wins.
+// TestModelDefaultReasoningEffort 验证请求省略时使用已保存默认值，而显式输入优先。
+func TestModelDefaultReasoningEffort(t *testing.T) {
+	model := Model{
+		DisplayName:            "Reason Model",
+		DefaultReasoningEffort: "high",
+		Raw: map[string]any{"thinking_config": map[string]any{
+			"disabled": map[string]any{},
+			"enabled":  map[string]any{"efforts": map[string]any{"low": map[string]any{}, "high": map[string]any{}}},
+		}},
+	}
+	if got, err := model.NormalizeReasoningEffort(""); err != nil || got != "high" {
+		t.Fatalf("default effort=(%q, %v), want high", got, err)
+	}
+	if got, err := model.NormalizeReasoningEffort("low"); err != nil || got != "low" {
+		t.Fatalf("explicit effort=(%q, %v), want low", got, err)
+	}
+	if got, err := model.NormalizeReasoningEffort("auto"); err != nil || got != "" {
+		t.Fatalf("explicit auto=(%q, %v), want empty", got, err)
+	}
+}
+
+// TestStaleModelDefaultFallsBackToAuto protects traffic when Qoder changes model capabilities.
+// TestStaleModelDefaultFallsBackToAuto 在 Qoder 改变模型能力时保护请求流量。
+func TestStaleModelDefaultFallsBackToAuto(t *testing.T) {
+	model := Model{DisplayName: "Reason Model", DefaultReasoningEffort: "high", Raw: map[string]any{"thinking_config": map[string]any{
+		"enabled": map[string]any{"efforts": map[string]any{"low": map[string]any{}}},
+	}}}
+	if got, err := model.NormalizeReasoningEffort(""); err != nil || got != "" {
+		t.Fatalf("stale default=(%q, %v), want auto fallback", got, err)
+	}
+}

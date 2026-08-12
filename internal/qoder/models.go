@@ -15,35 +15,43 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/credential"
 )
 
+// Model carries live Qoder capabilities plus an optional local default used by desktop requests.
+// Model 携带 Qoder 实时能力，以及桌面请求可选的本地默认值。
 type Model struct {
-	UpstreamID      string         `json:"upstream_id"`
-	DisplayName     string         `json:"display_name"`
-	Source          string         `json:"source,omitempty"`
-	IsReasoning     bool           `json:"is_reasoning,omitempty"`
-	IsVL            bool           `json:"is_vl,omitempty"`
-	MaxInputTokens  int            `json:"max_input_tokens,omitempty"`
-	MaxOutputTokens int            `json:"max_output_tokens,omitempty"`
-	Raw             map[string]any `json:"-"`
+	UpstreamID             string         `json:"upstream_id"`
+	DisplayName            string         `json:"display_name"`
+	Source                 string         `json:"source,omitempty"`
+	IsReasoning            bool           `json:"is_reasoning,omitempty"`
+	IsVL                   bool           `json:"is_vl,omitempty"`
+	MaxInputTokens         int            `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens        int            `json:"max_output_tokens,omitempty"`
+	Raw                    map[string]any `json:"-"`
+	DefaultReasoningEffort string         `json:"-"`
 }
 
-// SupportedReasoningEfforts returns the thinking-effort levels advertised by
-// Qoder for this model. The values come from thinking_config.enabled.efforts
-// and are returned in deterministic order.
+// SupportedReasoningEfforts returns deterministic live choices so callers never persist stale capabilities.
+// SupportedReasoningEfforts 返回确定顺序的实时选项，避免调用方持久化过期能力。
 func (m Model) SupportedReasoningEfforts() []string {
 	return reasoningEfforts(m.Raw)
 }
 
-// SupportsReasoningDisabled reports whether Qoder advertises an explicit
-// disabled thinking mode for this model.
+// SupportsReasoningDisabled reports the live off capability because not every model accepts "none".
+// SupportsReasoningDisabled 返回实时关闭能力，因为并非所有模型都接受 "none"。
 func (m Model) SupportsReasoningDisabled() bool {
 	return reasoningDisabled(m.Raw)
 }
 
-// NormalizeReasoningEffort validates a public per-request effort setting
-// against Qoder's live model metadata. Empty/auto/default means no override.
-// "off" is accepted as a convenience alias for Qoder's "none" value.
+// NormalizeReasoningEffort applies the model default only when the request omitted a value, then validates it.
+// NormalizeReasoningEffort 仅在请求未提供值时应用模型默认值，随后按实时能力校验。
 func (m Model) NormalizeReasoningEffort(value string) (string, error) {
-	requested := strings.ToLower(strings.TrimSpace(value))
+	requested := strings.TrimSpace(value)
+	usingDefault := requested == ""
+	// An explicit auto/default must bypass the saved default so clients retain per-request control.
+	// 显式 auto/default 必须绕过已保存默认值，确保客户端仍可逐请求控制。
+	if requested == "" {
+		requested = m.DefaultReasoningEffort
+	}
+	requested = strings.ToLower(strings.TrimSpace(requested))
 	switch requested {
 	case "", "auto", "default":
 		return "", nil
@@ -56,6 +64,11 @@ func (m Model) NormalizeReasoningEffort(value string) (string, error) {
 		if m.SupportsReasoningDisabled() {
 			return "none", nil
 		}
+		// A stale saved default must not break traffic after upstream capabilities change.
+		// 上游能力变化后，过期的已保存默认值不能导致请求中断。
+		if usingDefault {
+			return "", nil
+		}
 		return "", fmt.Errorf("model %q does not support disabling thinking", m.DisplayName)
 	}
 	for _, effort := range efforts {
@@ -64,7 +77,13 @@ func (m Model) NormalizeReasoningEffort(value string) (string, error) {
 		}
 	}
 	if len(efforts) == 0 {
+		if usingDefault {
+			return "", nil
+		}
 		return "", fmt.Errorf("model %q does not support configurable reasoning effort", m.DisplayName)
+	}
+	if usingDefault {
+		return "", nil
 	}
 	return "", fmt.Errorf("model %q does not support reasoning effort %q; supported efforts: %s", m.DisplayName, value, strings.Join(efforts, ", "))
 }

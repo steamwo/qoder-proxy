@@ -2,9 +2,11 @@ package desktop
 
 import "testing"
 
+// TestLogBufferEntriesAndStats verifies reasoning metadata remains visible without changing request statistics.
+// TestLogBufferEntriesAndStats 验证思考元数据保持可见，且不改变请求统计结果。
 func TestLogBufferEntriesAndStats(t *testing.T) {
 	buffer := NewLogBuffer(4096)
-	_, _ = buffer.Write([]byte("time=2026-08-13T10:24:28Z level=INFO msg=\"request completed\" method=POST path=/v1/chat/completions model=gpt-4o status=200 duration_ms=286 remote=127.0.0.1:53421\n"))
+	_, _ = buffer.Write([]byte("time=2026-08-13T10:24:28Z level=INFO msg=\"qoder response\" method=POST path=/v1/chat/completions model=gpt-4o reasoning_effort=high status=200 duration_ms=286 remote=127.0.0.1:53421\n"))
 	_, _ = buffer.Write([]byte("time=2026-08-13T10:24:29Z level=ERROR msg=\"request completed\" method=POST path=/v1/chat/completions model=gpt-4o status=500 duration_ms=1862 remote=127.0.0.1:53422\n"))
 
 	entries := buffer.Entries(10)
@@ -16,6 +18,9 @@ func TestLogBufferEntriesAndStats(t *testing.T) {
 	}
 	if entries[1].Path != "/v1/chat/completions" || entries[1].Model != "gpt-4o" {
 		t.Fatalf("parsed entry = %#v", entries[1])
+	}
+	if entries[1].ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q, want high", entries[1].ReasoningEffort)
 	}
 
 	stats := buffer.Stats()
