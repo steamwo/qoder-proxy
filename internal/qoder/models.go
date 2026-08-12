@@ -1,0 +1,303 @@
+package qoder
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/steamwo/qoder-proxy/internal/credential"
+)
+
+type Model struct {
+	UpstreamID      string         `json:"upstream_id"`
+	DisplayName     string         `json:"display_name"`
+	Source          string         `json:"source,omitempty"`
+	IsReasoning     bool           `json:"is_reasoning,omitempty"`
+	IsVL            bool           `json:"is_vl,omitempty"`
+	MaxInputTokens  int            `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens int            `json:"max_output_tokens,omitempty"`
+	Raw             map[string]any `json:"-"`
+}
+
+// SupportedReasoningEfforts returns the thinking-effort levels advertised by
+// Qoder for this model. The values come from thinking_config.enabled.efforts
+// and are returned in deterministic order.
+func (m Model) SupportedReasoningEfforts() []string {
+	return reasoningEfforts(m.Raw)
+}
+
+// SupportsReasoningDisabled reports whether Qoder advertises an explicit
+// disabled thinking mode for this model.
+func (m Model) SupportsReasoningDisabled() bool {
+	return reasoningDisabled(m.Raw)
+}
+
+// NormalizeReasoningEffort validates a public per-request effort setting
+// against Qoder's live model metadata. Empty/auto/default means no override.
+// "off" is accepted as a convenience alias for Qoder's "none" value.
+func (m Model) NormalizeReasoningEffort(value string) (string, error) {
+	requested := strings.ToLower(strings.TrimSpace(value))
+	switch requested {
+	case "", "auto", "default":
+		return "", nil
+	case "off":
+		requested = "none"
+	}
+
+	efforts := m.SupportedReasoningEfforts()
+	if requested == "none" {
+		if m.SupportsReasoningDisabled() {
+			return "none", nil
+		}
+		return "", fmt.Errorf("model %q does not support disabling thinking", m.DisplayName)
+	}
+	for _, effort := range efforts {
+		if requested == strings.ToLower(effort) {
+			return effort, nil
+		}
+	}
+	if len(efforts) == 0 {
+		return "", fmt.Errorf("model %q does not support configurable reasoning effort", m.DisplayName)
+	}
+	return "", fmt.Errorf("model %q does not support reasoning effort %q; supported efforts: %s", m.DisplayName, value, strings.Join(efforts, ", "))
+}
+
+func thinkingConfig(raw map[string]any) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	v, _ := raw["thinking_config"].(map[string]any)
+	return v
+}
+
+func reasoningDisabled(raw map[string]any) bool {
+	config := thinkingConfig(raw)
+	if config == nil {
+		return false
+	}
+	disabled, ok := config["disabled"]
+	return ok && disabled != nil
+}
+
+func reasoningEfforts(raw map[string]any) []string {
+	config := thinkingConfig(raw)
+	if config == nil {
+		return nil
+	}
+	enabled, _ := config["enabled"].(map[string]any)
+	if enabled == nil {
+		return nil
+	}
+	efforts, _ := enabled["efforts"].(map[string]any)
+	if len(efforts) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(efforts))
+	for key := range efforts {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+type Registry struct {
+	client *http.Client
+	cred   credential.Credential
+
+	mu        sync.RWMutex
+	models    []Model
+	byDisplay map[string]Model
+	byID      map[string]Model
+	fetchedAt time.Time
+	ttl       time.Duration
+}
+
+func NewRegistry(client *http.Client, cred credential.Credential) *Registry {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return &Registry{client: client, cred: cred, ttl: 5 * time.Minute}
+}
+
+func (r *Registry) Refresh(ctx context.Context) error {
+	started := time.Now()
+	slog.Debug("refreshing qoder models")
+	models, err := fetchModels(ctx, r.client, r.cred)
+	if err != nil {
+		slog.Error("qoder model refresh failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		return err
+	}
+	byDisplay := make(map[string]Model, len(models))
+	byID := make(map[string]Model, len(models))
+	for _, m := range models {
+		byID[m.UpstreamID] = m
+		if existing, ok := byDisplay[m.DisplayName]; !ok || m.UpstreamID < existing.UpstreamID {
+			// A public OpenAI model ID must be unique. If Qoder ever returns the same
+			// display_name for multiple internal IDs, choose deterministically while
+			// keeping every internal ID available through the hidden byID index.
+			byDisplay[m.DisplayName] = m
+		}
+	}
+	publicModels := make([]Model, 0, len(byDisplay))
+	for _, m := range byDisplay {
+		publicModels = append(publicModels, m)
+	}
+	sort.Slice(publicModels, func(i, j int) bool {
+		return publicModels[i].DisplayName < publicModels[j].DisplayName
+	})
+	r.mu.Lock()
+	r.models, r.byDisplay, r.byID, r.fetchedAt = publicModels, byDisplay, byID, time.Now()
+	r.mu.Unlock()
+	slog.Info("qoder models refreshed", "models", len(publicModels), "upstream_models", len(models), "duration_ms", time.Since(started).Milliseconds())
+	return nil
+}
+
+func (r *Registry) ensure(ctx context.Context) error {
+	r.mu.RLock()
+	fresh := len(r.models) > 0 && time.Since(r.fetchedAt) < r.ttl
+	r.mu.RUnlock()
+	if fresh {
+		return nil
+	}
+	return r.Refresh(ctx)
+}
+
+func (r *Registry) List(ctx context.Context) ([]Model, error) {
+	if err := r.ensure(ctx); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := append([]Model(nil), r.models...)
+	return out, nil
+}
+
+func (r *Registry) Resolve(ctx context.Context, publicName string) (Model, error) {
+	if err := r.ensure(ctx); err != nil {
+		return Model{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if m, ok := r.byDisplay[publicName]; ok {
+		slog.Debug("model resolved", "display_name", publicName, "upstream_model", m.UpstreamID)
+		return m, nil
+	}
+	// Keep upstream IDs as a hidden compatibility/debugging input, but never expose them in /v1/models.
+	if m, ok := r.byID[publicName]; ok {
+		slog.Warn("upstream model id used directly", "upstream_model", publicName, "display_name", m.DisplayName)
+		return m, nil
+	}
+	return Model{}, fmt.Errorf("model %q not found", publicName)
+}
+
+func fetchModels(ctx context.Context, client *http.Client, cred credential.Credential) ([]Model, error) {
+	url := BaseURL + ModelsPath
+	headers, err := BuildHeaders(nil, url, cred)
+	if err != nil {
+		return nil, err
+	}
+	headers.Set("Accept", "application/json")
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Accept-Encoding", "identity")
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req.Header = headers
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("qoder models returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	items := modelItems(payload["chat"])
+	models := make([]Model, 0, len(items))
+	for _, item := range items {
+		id := firstString(item, "key", "model", "model_id", "modelId", "id")
+		if id == "" {
+			continue
+		}
+		display := firstString(item, "display_name", "displayName", "label", "title", "name")
+		if display == "" {
+			display = id
+		}
+		models = append(models, Model{
+			UpstreamID: id, DisplayName: display,
+			Source:      firstString(item, "source"),
+			IsReasoning: boolField(item, "is_reasoning"), IsVL: boolField(item, "is_vl"),
+			MaxInputTokens: intField(item, "max_input_tokens"), MaxOutputTokens: intField(item, "max_output_tokens"),
+			Raw: cloneMap(item),
+		})
+	}
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].DisplayName == models[j].DisplayName {
+			return models[i].UpstreamID < models[j].UpstreamID
+		}
+		return models[i].DisplayName < models[j].DisplayName
+	})
+	return models, nil
+}
+
+func modelItems(v any) []map[string]any {
+	var out []map[string]any
+	switch chat := v.(type) {
+	case []any:
+		for _, raw := range chat {
+			if m, ok := raw.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(chat))
+		for k := range chat {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if m, ok := chat[key].(map[string]any); ok {
+				copy := cloneMap(m)
+				if firstString(copy, "key") == "" {
+					copy["key"] = key
+				}
+				out = append(out, copy)
+			}
+		}
+	}
+	return out
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func boolField(m map[string]any, k string) bool { v, _ := m[k].(bool); return v }
+func intField(m map[string]any, k string) int {
+	switch v := m[k].(type) {
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	case int:
+		return v
+	default:
+		return 0
+	}
+}

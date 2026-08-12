@@ -1,0 +1,8 @@
+
+*.exe
+*.test
+.DS_Store
+coverage.out
+dist/
+qoder-proxy
+.codebase-memory/
