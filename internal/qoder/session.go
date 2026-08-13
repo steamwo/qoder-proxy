@@ -8,13 +8,14 @@ import (
 )
 
 // sessionIDForRequest preserves a trustworthy client conversation/agent across
-// turns while keeping the upstream identifier opaque. Qoder account and model
-// remain part of the namespace, matching the provider's routing/cache affinity
-// while adding the missing client-conversation isolation. Requests without a
-// client-provided session key are isolated with a fresh random UUID.
-func sessionIDForRequest(req protocol.Request, userID string) (string, error) {
+// turns while keeping the upstream identifier opaque. The Qoder model remains
+// part of the namespace, matching the provider's routing/cache affinity while
+// adding the missing client-conversation isolation. The authenticated Qoder
+// account already scopes the upstream request. Requests without a client-
+// provided session key are isolated with a fresh random UUID.
+func sessionIDForRequest(req protocol.Request) (string, error) {
 	if key := strings.TrimSpace(req.ClientSessionKey); key != "" {
-		return stableHash("qoder-client-session", strings.TrimSpace(userID), req.ModelID, key), nil
+		return stableHash("qoder-client-session", req.ModelID, key), nil
 	}
 	id, err := randomUUID()
 	if err != nil {
