@@ -51,10 +51,17 @@ func (b *Backend) SetModelReasoningDefaults(defaults map[string]string) {
 	b.defaultsMu.Unlock()
 }
 
+func bindClientSession(ctx context.Context, req protocol.Request) protocol.Request {
+	if key := clientSessionKeyFromContext(ctx); key != "" {
+		req.ClientSessionKey = key
+	}
+	return req
+}
+
 // Chat keeps the protocol boundary thin so one upstream client owns request behavior.
 // Chat 保持协议边界精简，由单一上游客户端统一请求行为。
 func (b *Backend) Chat(ctx context.Context, req protocol.Request) (*http.Response, error) {
-	normalized := normalizeQoderRequest(req)
+	normalized := bindClientSession(ctx, normalizeQoderRequest(req))
 	resp, err := b.Qoder.Chat(ctx, normalized)
 	if err != nil {
 		return nil, err
@@ -68,7 +75,7 @@ func (b *Backend) Chat(ctx context.Context, req protocol.Request) (*http.Respons
 // ChatWithQueue preserves queue callbacks without duplicating retry policy in adapters.
 // ChatWithQueue 保留排队回调，避免各适配器重复重试策略。
 func (b *Backend) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(qoder.QueueInfo) error) (*http.Response, error) {
-	normalized := normalizeQoderRequest(req)
+	normalized := bindClientSession(ctx, normalizeQoderRequest(req))
 	resp, err := b.Qoder.ChatWithQueue(ctx, normalized, onQueue)
 	if err != nil {
 		return nil, err
@@ -101,7 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { openai.HandleChat(w, r, s.Backend) })
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) { openai.HandleResponses(w, r, s.Backend) })
 	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { anthropic.HandleMessagesCompatible(w, r, s.Backend) })
-	return s.accessLog(s.cors(s.auth(mux)))
+	return s.accessLog(s.cors(s.auth(clientSession(mux))))
 }
 
 type responseRecorder struct {
