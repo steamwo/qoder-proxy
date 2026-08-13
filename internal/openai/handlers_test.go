@@ -176,23 +176,24 @@ func TestChatStreamQuotaErrorReturnsHTTP429BeforeSSEStarts(t *testing.T) {
 	}
 }
 
-func TestChatReasoningEffortRejectedWhenModelDoesNotAdvertiseIt(t *testing.T) {
+func TestChatReasoningEffortIgnoredWhenModelDoesNotAdvertiseIt(t *testing.T) {
 	backend := &fakeBackend{
 		model: qoder.Model{
 			UpstreamID: "kimi-k3-id", DisplayName: "Kimi-K3",
 			Raw: map[string]any{"key": "kimi-k3-id", "context_config": map[string]any{"200K": map[string]any{"token_count": 200000}}},
 		},
+		body: qoderFrame(`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`) + "data: [DONE]\n\n",
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
 		"model":"Kimi-K3","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]
 	}`))
 	rr := httptest.NewRecorder()
 	HandleChat(rr, req, backend)
-	if rr.Code != http.StatusBadRequest {
+	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "does not support configurable reasoning effort") {
-		t.Fatalf("body=%s", rr.Body.String())
+	if backend.last.ReasoningEffort != "" {
+		t.Fatalf("unsupported effort leaked upstream: %q", backend.last.ReasoningEffort)
 	}
 }
 
