@@ -1,178 +1,175 @@
 package server
 
 import (
-	"encoding/json"
+	"log/slog"
 	"strings"
 
 	"github.com/steamwo/qoder-proxy/internal/protocol"
 )
 
-// normalizeQoderRequest converts adapter-internal OpenAI-style tool history to
-// Qoder's user/assistant transcript shape. Qoder represents assistant tool calls
-// as tool_use content blocks and tool feedback as tool_result blocks inside a
-// user message; it does not accept role=tool in conversation history.
+// normalizeQoderRequest keeps the adapter-produced OpenAI tool protocol intact.
+// Qoder's agent chat endpoint accepts assistant.tool_calls followed by role=tool
+// messages; converting those back into Anthropic tool_use/tool_result blocks
+// breaks multi-turn agent loops. This pass only repairs malformed history that
+// can appear after client-side context compaction.
 func normalizeQoderRequest(req protocol.Request) protocol.Request {
 	if len(req.Messages) == 0 {
 		return req
 	}
 
-	changed := false
-	messages := make([]map[string]any, 0, len(req.Messages))
-	pendingToolResults := make([]any, 0)
-
-	flushToolResults := func() {
-		if len(pendingToolResults) == 0 {
-			return
-		}
-		blocks := append([]any(nil), pendingToolResults...)
-		messages = append(messages, map[string]any{"role": "user", "content": blocks})
-		pendingToolResults = pendingToolResults[:0]
-		changed = true
-	}
-
-	for _, message := range req.Messages {
-		role := strings.ToLower(strings.TrimSpace(stringField(message, "role")))
-		switch role {
-		case "tool":
-			toolID := strings.TrimSpace(stringField(message, "tool_call_id"))
-			if toolID == "" {
-				flushToolResults()
-				messages = append(messages, message)
-				continue
-			}
-			content := message["content"]
-			if content == nil {
-				content = ""
-			}
-			block := map[string]any{
-				"type":        "tool_result",
-				"tool_use_id": toolID,
-				"content":     content,
-			}
-			if isError, ok := message["is_error"].(bool); ok {
-				block["is_error"] = isError
-			}
-			pendingToolResults = append(pendingToolResults, block)
-			changed = true
-
-		case "user":
-			if len(pendingToolResults) == 0 {
-				messages = append(messages, message)
-				continue
-			}
-			blocks := append([]any(nil), pendingToolResults...)
-			blocks = appendUserContentBlocks(blocks, message["content"])
-			merged := cloneMessage(message)
-			merged["role"] = "user"
-			merged["content"] = blocks
-			messages = append(messages, merged)
-			pendingToolResults = pendingToolResults[:0]
-			changed = true
-
-		case "assistant":
-			flushToolResults()
-			normalized, didChange := normalizeAssistantToolCalls(message)
-			messages = append(messages, normalized)
-			changed = changed || didChange
-
-		default:
-			flushToolResults()
-			messages = append(messages, message)
-		}
-	}
-	flushToolResults()
-
-	if changed {
+	messages, stats := canonicalizeQoderToolHistory(req.Messages)
+	if stats.missingToolResults > 0 || stats.reorderedToolResults > 0 {
 		req.Messages = messages
+		slog.Warn("qoder tool history repaired",
+			"missing_tool_results", stats.missingToolResults,
+			"reordered_tool_results", stats.reorderedToolResults,
+			"tool_calls", stats.toolCalls,
+			"tool_results", stats.toolResults,
+			"messages_before", len(req.Messages),
+			"messages_after", len(messages),
+			"tail_roles", tailMessageRoles(messages, 8),
+		)
 	}
 	return req
 }
 
-func normalizeAssistantToolCalls(message map[string]any) (map[string]any, bool) {
-	calls, ok := message["tool_calls"].([]any)
-	if !ok || len(calls) == 0 {
-		return message, false
+type toolHistoryStats struct {
+	toolCalls            int
+	toolResults          int
+	missingToolResults   int
+	reorderedToolResults int
+}
+
+// canonicalizeQoderToolHistory enforces the OpenAI tool-call ordering contract:
+// every tool response for an assistant tool_calls turn must appear immediately
+// after that assistant turn, before any user text or later assistant turn. If a
+// compacted transcript dropped a response entirely, synthesize the same neutral
+// placeholder used by mature Claude/OpenAI compatibility bridges.
+func canonicalizeQoderToolHistory(input []map[string]any) ([]map[string]any, toolHistoryStats) {
+	stats := toolHistoryStats{}
+	for _, message := range input {
+		if messageRole(message) == "tool" {
+			stats.toolResults++
+		}
 	}
 
-	blocks := make([]any, 0, len(calls)+1)
-	blocks = appendAssistantContentBlocks(blocks, message["content"])
-	converted := 0
+	out := make([]map[string]any, 0, len(input))
+	for i := 0; i < len(input); {
+		message := input[i]
+		ids := assistantToolCallIDs(message)
+		if messageRole(message) != "assistant" || len(ids) == 0 {
+			out = append(out, message)
+			i++
+			continue
+		}
+
+		stats.toolCalls += len(ids)
+		out = append(out, message)
+
+		expected := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			if id != "" {
+				expected[id] = struct{}{}
+			}
+		}
+		responded := make(map[string]struct{}, len(expected))
+		matched := make([]map[string]any, 0, len(expected))
+		deferred := make([]map[string]any, 0)
+
+		j := i + 1
+		for ; j < len(input); j++ {
+			next := input[j]
+			if messageRole(next) == "assistant" {
+				break
+			}
+			if messageRole(next) == "tool" {
+				toolID := strings.TrimSpace(stringValue(next["tool_call_id"]))
+				if _, wanted := expected[toolID]; wanted {
+					if _, duplicate := responded[toolID]; !duplicate {
+						if len(deferred) > 0 {
+							stats.reorderedToolResults++
+						}
+						responded[toolID] = struct{}{}
+						matched = append(matched, next)
+						continue
+					}
+				}
+			}
+			deferred = append(deferred, next)
+		}
+
+		out = append(out, matched...)
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, ok := responded[id]; ok {
+				continue
+			}
+			out = append(out, map[string]any{
+				"role":         "tool",
+				"tool_call_id": id,
+				"content":      "[No response received]",
+			})
+			responded[id] = struct{}{}
+			stats.missingToolResults++
+		}
+		out = append(out, deferred...)
+		i = j
+	}
+
+	return out, stats
+}
+
+func assistantToolCallIDs(message map[string]any) []string {
+	if messageRole(message) != "assistant" {
+		return nil
+	}
+	calls, ok := message["tool_calls"].([]any)
+	if !ok || len(calls) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(calls))
+	seen := make(map[string]struct{}, len(calls))
 	for _, raw := range calls {
 		call, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		fn, _ := call["function"].(map[string]any)
-		id := strings.TrimSpace(stringField(call, "id"))
-		name := strings.TrimSpace(stringField(fn, "name"))
-		if id == "" || name == "" {
+		id := strings.TrimSpace(stringValue(call["id"]))
+		if id == "" {
 			continue
 		}
-		input := any(map[string]any{})
-		if args := strings.TrimSpace(stringField(fn, "arguments")); args != "" {
-			var parsed any
-			if json.Unmarshal([]byte(args), &parsed) == nil && parsed != nil {
-				input = parsed
-			}
+		if _, exists := seen[id]; exists {
+			continue
 		}
-		blocks = append(blocks, map[string]any{
-			"type":  "tool_use",
-			"id":    id,
-			"name":  name,
-			"input": input,
-		})
-		converted++
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
-	if converted == 0 {
-		return message, false
-	}
-
-	normalized := cloneMessage(message)
-	delete(normalized, "tool_calls")
-	normalized["role"] = "assistant"
-	normalized["content"] = blocks
-	return normalized, true
+	return ids
 }
 
-func appendAssistantContentBlocks(blocks []any, content any) []any {
-	switch value := content.(type) {
-	case string:
-		if value != "" {
-			blocks = append(blocks, map[string]any{"type": "text", "text": value})
-		}
-	case []any:
-		blocks = append(blocks, value...)
-	}
-	return blocks
+func messageRole(message map[string]any) string {
+	return strings.ToLower(strings.TrimSpace(stringValue(message["role"])))
 }
 
-func appendUserContentBlocks(blocks []any, content any) []any {
-	switch value := content.(type) {
-	case string:
-		if value != "" {
-			blocks = append(blocks, map[string]any{"type": "text", "text": value})
-		}
-	case []any:
-		blocks = append(blocks, value...)
-	case nil:
-	default:
-		blocks = append(blocks, map[string]any{"type": "text", "text": value})
-	}
-	return blocks
+func stringValue(value any) string {
+	s, _ := value.(string)
+	return s
 }
 
-func cloneMessage(message map[string]any) map[string]any {
-	cloned := make(map[string]any, len(message))
-	for key, value := range message {
-		cloned[key] = value
+func tailMessageRoles(messages []map[string]any, max int) []string {
+	if max <= 0 || len(messages) == 0 {
+		return nil
 	}
-	return cloned
-}
-
-func stringField(m map[string]any, key string) string {
-	if m == nil {
-		return ""
+	start := len(messages) - max
+	if start < 0 {
+		start = 0
 	}
-	value, _ := m[key].(string)
-	return value
+	roles := make([]string, 0, len(messages)-start)
+	for _, message := range messages[start:] {
+		roles = append(roles, messageRole(message))
+	}
+	return roles
 }
