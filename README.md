@@ -2,7 +2,28 @@
 
 [简体中文](README.md) · [English](README_EN.md)
 
-将 Qoder 账号转换为本地 OpenAI / Anthropic 兼容 API 的 Go 代理，提供原生命令行与桌面客户端。
+将 Qoder 账号转换为本地 OpenAI / Anthropic 兼容 API 的 Go 代理，提供原生命令行、轻量后台服务与 Gio 桌面客户端。
+
+## 运行方式
+
+- `qoder-proxy-desktop-*`：现有一体化 Gio GUI，完整保留。
+- `qoder-proxy-headless-*`：纯前台代理，适合服务器和内存诊断。
+- `qoder-proxy-service-*`：不链接 Gio 的轻量后台服务；代理 API 与本地管理页共用一个端口。
+
+轻量 service 默认读取 `desktop.json` 中的监听地址（默认 `127.0.0.1:9000`）：
+
+- OpenAI / Anthropic API：`http://127.0.0.1:9000/v1/...`
+- 本地管理页：`http://127.0.0.1:9000/admin/`
+
+管理页仅允许本机访问。即使代理监听配置为 `0.0.0.0`，远程客户端访问 `/admin` 也会被拒绝。
+
+管理页支持：Qoder 网页授权、代理启动/停止/配置、模型默认思考深度、运行时内存和日志。关闭浏览器页面不会停止后台服务；点击“显式退出后台服务”会结束进程。也可从命令行执行：
+
+```powershell
+qoder-proxy-service-windows-amd64.exe --shutdown
+```
+
+监听地址本身修改后，需要退出并重新启动 service 才会绑定到新地址；API Key、队列策略和模型默认设置可在当前进程中重载。
 
 ## 主要功能
 
@@ -19,33 +40,6 @@
 - Windows 系统托盘、关闭后驻留、任务栏与托盘品牌图标
 - 本地结构化日志、自动限额与数据路径透明展示
 
-## 桌面客户端
-
-桌面客户端提供：
-
-- Qoder 登录与退出登录
-- 账号身份、套餐和实时额度
-- 可搜索的模型能力列表
-- 代理启动、停止、运行时间与监听地址
-- 可搜索的结构化请求日志和事件详情
-- 代理、队列、本地鉴权和托盘设置
-- “数据与隐私”页面，展示账号、设置和日志的实际存储位置
-
-Windows 托盘支持：
-
-- 单击或双击打开主窗口
-- 右键启动/停止代理、刷新额度、退出程序
-- 关闭主窗口后继续驻留并保持代理运行
-
-### 下载自动构建
-
-每次推送到 `main`，GitHub Actions 都会生成：
-
-- `qoder-proxy-windows-amd64`
-- `qoder-proxy-linux-amd64`
-
-可在 [Actions](https://github.com/steamwo/qoder-proxy/actions) 页面下载。推送 `v*` 标签时会自动创建 GitHub Release，并附带两个平台的构建产物。
-
 ## 快速开始：命令行
 
 需要 Go 1.23 或更高版本。
@@ -54,37 +48,11 @@ Windows 托盘支持：
 go build -o qoder-proxy ./cmd/qoder-proxy
 ```
 
-### 登录
-
-```bash
-./qoder-proxy login
-```
-
-无图形界面环境：
-
-```bash
-./qoder-proxy login --no-browser
-```
-
-### 启动代理
+已使用桌面端或管理页完成 Qoder 授权后：
 
 ```bash
 ./qoder-proxy serve
 ```
-
-默认监听：
-
-```text
-127.0.0.1:8080
-```
-
-指定监听地址：
-
-```bash
-./qoder-proxy serve --listen 127.0.0.1:9000
-```
-
-默认只监听回环地址，避免无意中向局域网暴露服务。
 
 ## 快速开始：桌面端
 
@@ -112,40 +80,24 @@ Linux：
 dist/qoder-proxy-desktop-linux-amd64
 ```
 
-Linux 需要 Gio 所使用的 EGL、Vulkan、Wayland 和 X11 开发依赖。详细说明见 [桌面客户端文档](docs/desktop.md)。
+Linux 需要 Gio 所使用的 EGL、Vulkan、Wayland 和 X11 开发依赖。详细说明见 `docs/desktop.md`。
 
 ## API 使用示例
 
-### 模型列表
-
 ```bash
-curl http://127.0.0.1:8080/v1/models
+curl http://127.0.0.1:9000/v1/models
 ```
 
 `/v1/models` 返回 Qoder 的 `display_name` 作为公开模型 ID。内部 `key` / `model_id` 只用于请求 Qoder，不会通过模型列表暴露。
 
 ### Chat Completions
 
-非流式：
-
 ```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "messages": [{"role":"user","content":"你好"}]
-  }'
-```
-
-流式：
-
-```bash
-curl -N http://127.0.0.1:8080/v1/chat/completions \
+curl -N http://127.0.0.1:9000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "Claude Sonnet 4",
     "stream": true,
-    "stream_options": {"include_usage": true},
     "messages": [{"role":"user","content":"你好"}]
   }'
 ```
@@ -153,18 +105,15 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 ### Responses
 
 ```bash
-curl http://127.0.0.1:8080/v1/responses \
+curl http://127.0.0.1:9000/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "input": "你好"
-  }'
+  -d '{"model":"Claude Sonnet 4","input":"你好"}'
 ```
 
 ### Anthropic Messages
 
 ```bash
-curl http://127.0.0.1:8080/v1/messages \
+curl http://127.0.0.1:9000/v1/messages \
   -H 'Content-Type: application/json' \
   -H 'anthropic-version: 2023-06-01' \
   -d '{
@@ -176,199 +125,6 @@ curl http://127.0.0.1:8080/v1/messages \
 
 ## 推理强度
 
-项目不会硬编码哪些模型支持推理强度，而是读取 Qoder 模型列表中的实时 `thinking_config`。
+项目不会硬编码哪些模型支持推理强度，而是读取 Qoder 模型列表中的实时 `thinking_config`。网页管理页和 Gio 桌面端都使用这一真实能力集合生成每个模型的可选项。
 
-常见值包括：
-
-```text
-low, medium, high, xhigh, max
-```
-
-`auto` / `default` 表示不覆盖默认行为；当模型提供禁用思考模式时，`off` 会映射为 Qoder 的 `none`。
-
-OpenAI Chat Completions：
-
-```json
-{
-  "model": "DeepSeek-V4-Flash",
-  "reasoning_effort": "high",
-  "messages": [{"role":"user","content":"解决这个问题"}]
-}
-```
-
-OpenAI Responses：
-
-```json
-{
-  "model": "DeepSeek-V4-Flash",
-  "reasoning": {"effort":"high"},
-  "input": "解决这个问题"
-}
-```
-
-Anthropic Messages：
-
-```json
-{
-  "model": "DeepSeek-V4-Flash",
-  "max_tokens": 4096,
-  "output_config": {"effort":"high"},
-  "messages": [{"role":"user","content":"解决这个问题"}]
-}
-```
-
-不支持的推理级别会返回 HTTP 400，不会静默降级。
-
-## 本地 API Key
-
-通过环境变量启用本地鉴权：
-
-```bash
-QODER_PROXY_API_KEY=local-secret ./qoder-proxy serve
-```
-
-OpenAI 客户端：
-
-```text
-Authorization: Bearer local-secret
-```
-
-Anthropic 客户端：
-
-```text
-x-api-key: local-secret
-```
-
-## 数据存储位置
-
-### 账号凭据
-
-- Windows：`%AppData%\qoder-proxy\credentials.json`
-- Linux：`${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/credentials.json`
-- macOS：`~/Library/Application Support/qoder-proxy/credentials.json`
-
-通过 `QODER_PROXY_CREDENTIALS` 可以覆盖默认路径。账号文件包含访问令牌，请勿共享。
-
-### 桌面配置
-
-- Windows：`%AppData%\qoder-proxy\desktop.json`
-- Linux：`${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/desktop.json`
-
-### 桌面日志
-
-- Windows：`%LocalAppData%\qoder-proxy\logs\desktop.log`
-- Linux：`${XDG_CACHE_HOME:-~/.cache}/qoder-proxy/logs/desktop.log`
-
-桌面日志自动限制为 4 MB。“清空日志”会同时清除内存和磁盘内容。日志不会记录凭据、Authorization 头或完整请求正文。
-
-## Qoder 排队和额度错误
-
-### 免费账号排队
-
-Qoder 可能返回业务码 `10605`、`isQueued: true` 和建议的 `retryAfterSeconds`。代理会：
-
-- 等待服务端建议的时间
-- 重新签名并重试请求
-- 对流式 Chat Completions 发送 SSE 注释心跳，避免客户端空闲超时
-
-默认配置：
-
-```text
---queue-retries 20
---queue-max-wait 10m
-```
-
-### 额度不足
-
-Qoder 业务码 `112` 会映射为 HTTP 429，并返回 OpenAI / Anthropic 对应格式的额度错误。额度不足不会进入排队重试。
-
-## 日志
-
-命令行日志默认输出到 stderr，支持以下级别：
-
-```text
-debug, info, warn, error, off
-```
-
-启用调试日志：
-
-```bash
-./qoder-proxy serve --log-level debug
-```
-
-或：
-
-```bash
-QODER_PROXY_LOG_LEVEL=debug ./qoder-proxy serve
-```
-
-## 环境变量
-
-| 变量 | 作用 |
-| --- | --- |
-| `QODER_PROXY_LISTEN` | HTTP 监听地址，默认 `127.0.0.1:8080` |
-| `QODER_PROXY_API_KEY` | 可选的本地 Bearer API Key |
-| `QODER_PROXY_CREDENTIALS` | 覆盖账号凭据 JSON 路径 |
-| `QODER_PROXY_LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error`、`off` |
-| `QODER_PROXY_QUEUE_RETRIES` | 免费账号排队重试次数 |
-| `QODER_PROXY_QUEUE_MAX_WAIT` | 排队总等待上限 |
-| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Go 标准 HTTP 代理变量 |
-
-## 其他命令
-
-```bash
-./qoder-proxy models
-./qoder-proxy status
-./qoder-proxy logout
-```
-
-## 自动构建与发布
-
-[GitHub Actions 工作流](.github/workflows/build.yml)会在以下情况运行：
-
-- 推送到 `main`
-- 创建或更新面向 `main` 的 Pull Request
-- 手动触发 `workflow_dispatch`
-- 推送 `v*` 标签
-
-工作流执行：
-
-1. `go test ./...`
-2. `go vet ./...`
-3. 构建无控制台窗口、带品牌图标的 Windows GUI 程序
-4. 安装 Gio 原生依赖并构建 Linux 程序
-5. 上传两个平台的 Artifact
-6. 对 `v*` 标签自动创建 GitHub Release
-
-## 项目结构
-
-```text
-cmd/qoder-proxy            命令行程序
-cmd/qoder-proxy-desktop    Gio 桌面客户端
-internal/qoder             Qoder 鉴权、签名、模型、额度与流式协议
-internal/openai            OpenAI Chat Completions / Responses 适配
-internal/anthropic         Anthropic Messages 适配
-internal/server            HTTP 服务
-internal/desktop           桌面端代理、设置、日志与托盘
-assets                     桌面品牌图标
-```
-
-更多资料：
-
-- [桌面端构建和数据路径](docs/desktop.md)
-- [项目架构](docs/architecture.md)
-- [设计说明](docs/design.md)
-
-## 当前范围
-
-当前版本聚焦本地单账号使用：
-
-- 单个 Qoder 凭据
-- Qoder PKCE 设备登录
-- COSY 请求签名
-- 模型发现与缓存
-- 文本输入输出
-- Function Calling / Tool Use
-- OpenAI 与 Anthropic 流式/非流式兼容
-
-多账号池、Cloudflare Workers、D1、KV、网关额度和多供应商路由暂不属于当前范围。
+`auto` / `default` 表示不覆盖默认行为；当模型提供禁用思考模式时，`off` 会映射为 Qoder 的 `none`。不支持的推理级别会返回 HTTP 400，不会静默降级。
