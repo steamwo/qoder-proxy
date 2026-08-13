@@ -8,6 +8,12 @@ import (
 
 type clientSessionContextKey struct{}
 
+func clientSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, withClientSessionContext(r))
+	})
+}
+
 func withClientSessionContext(r *http.Request) *http.Request {
 	key := clientSessionKeyFromHeaders(r)
 	if key == "" {
