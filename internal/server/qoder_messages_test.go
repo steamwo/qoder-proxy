@@ -58,13 +58,16 @@ func TestNormalizeQoderRequestConstrainsAdvertisedTools(t *testing.T) {
 	for _, want := range []string{
 		"base system",
 		"[qoder-proxy tool availability]",
-		"The executable tools for this turn are exactly: Read, ToolSearch.",
-		"If Bash or another desired tool is absent, do not call it.",
-		"use ToolSearch to load a deferred tool",
+		"Only call tools present in the current request's tool schemas.",
+		"If a desired tool is not present and ToolSearch is available, call ToolSearch first to load it.",
+		"Do not invent or use Qoder-only tools.",
 	} {
 		if !strings.Contains(got.System, want) {
 			t.Fatalf("system missing %q: %s", want, got.System)
 		}
+	}
+	if strings.Contains(got.System, "Read, ToolSearch") {
+		t.Fatalf("tool names should not be duplicated into the system prompt: %s", got.System)
 	}
 }
 
