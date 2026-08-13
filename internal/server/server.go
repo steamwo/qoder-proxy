@@ -79,20 +79,6 @@ func (b *Backend) ChatWithQueue(ctx context.Context, req protocol.Request, onQue
 	return resp, nil
 }
 
-// anthropicBackend opts only Anthropic /v1/messages traffic into the Claude
-// Code compatibility layer. OpenAI adapters continue to use Backend directly.
-type anthropicBackend struct{ *Backend }
-
-func (b anthropicBackend) Chat(ctx context.Context, req protocol.Request) (*http.Response, error) {
-	req.ClaudeToolCompatibility = true
-	return b.Backend.Chat(ctx, req)
-}
-
-func (b anthropicBackend) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(qoder.QueueInfo) error) (*http.Response, error) {
-	req.ClaudeToolCompatibility = true
-	return b.Backend.ChatWithQueue(ctx, req, onQueue)
-}
-
 // Server owns the public handler and authentication configuration.
 // Server 管理公开处理器与认证配置。
 type Server struct {
@@ -112,7 +98,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/models", s.models)
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { openai.HandleChat(w, r, s.Backend) })
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) { openai.HandleResponses(w, r, s.Backend) })
-	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { anthropic.HandleMessagesCompatible(w, r, anthropicBackend{Backend: s.Backend}) })
+	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { anthropic.HandleMessagesCompatible(w, r, s.Backend) })
 	return s.accessLog(s.cors(s.auth(mux)))
 }
 
