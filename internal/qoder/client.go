@@ -173,7 +173,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	if tools == nil {
 		tools = []any{}
 	}
-	recordID := stableHash("qoder-record", req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
+	recordID := stableHash("qoder-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
 	parameters := map[string]any{"max_tokens": maxTokens}
