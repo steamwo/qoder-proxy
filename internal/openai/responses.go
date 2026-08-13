@@ -43,7 +43,7 @@ func HandleResponses(w http.ResponseWriter, r *http.Request, backend Backend) {
 	defer resp.Body.Close()
 
 	if req.Stream {
-		streamResponses(w, resp, req)
+		streamResponses(w, resp, req, preq.ToolRoutes)
 		return
 	}
 	a, err := collectEvents(resp)
@@ -51,7 +51,7 @@ func HandleResponses(w http.ResponseWriter, r *http.Request, backend Backend) {
 		writeError(w, http.StatusBadGateway, "upstream_stream_error", err.Error())
 		return
 	}
-	state := newResponseState(req)
+	state := newResponseState(req, preq.ToolRoutes)
 	state.applyAggregate(a)
 	writeJSON(w, http.StatusOK, state.responseObject("completed"))
 }
@@ -62,6 +62,8 @@ type responseTool struct {
 	Name        string
 	Args        string
 	OutputIndex int
+	Route       protocol.ToolRoute
+	Added       bool
 }
 
 type responseState struct {
@@ -76,17 +78,19 @@ type responseState struct {
 	TextStarted bool
 
 	Tools      map[int]*responseTool
+	Routes     map[string]protocol.ToolRoute
 	NextOutput int
 	Usage      protocol.Usage
 }
 
-func newResponseState(req ResponsesRequest) *responseState {
+func newResponseState(req ResponsesRequest, routes map[string]protocol.ToolRoute) *responseState {
 	return &responseState{
 		Req:       req,
 		ID:        newID("resp_"),
 		Created:   time.Now().Unix(),
 		TextIndex: -1,
 		Tools:     map[int]*responseTool{},
+		Routes:    routes,
 	}
 }
 
@@ -105,6 +109,13 @@ func (s *responseState) ensureText() {
 	s.NextOutput++
 }
 
+func (s *responseState) routeFor(name string) protocol.ToolRoute {
+	if route, ok := s.Routes[name]; ok {
+		return route
+	}
+	return protocol.ToolRoute{Kind: "function", Name: name}
+}
+
 func (s *responseState) ensureTool(index int, callID, name string) *responseTool {
 	if t := s.Tools[index]; t != nil {
 		if callID != "" {
@@ -112,6 +123,7 @@ func (s *responseState) ensureTool(index int, callID, name string) *responseTool
 		}
 		if name != "" {
 			t.Name = name
+			t.Route = s.routeFor(name)
 		}
 		return t
 	}
@@ -120,6 +132,7 @@ func (s *responseState) ensureTool(index int, callID, name string) *responseTool
 		CallID:      callID,
 		Name:        name,
 		OutputIndex: s.NextOutput,
+		Route:       s.routeFor(name),
 	}
 	if t.CallID == "" {
 		t.CallID = newID("call_")
@@ -127,6 +140,54 @@ func (s *responseState) ensureTool(index int, callID, name string) *responseTool
 	s.NextOutput++
 	s.Tools[index] = t
 	return t
+}
+
+func (t *responseTool) clientRoute() protocol.ToolRoute {
+	route := t.Route
+	if route.Kind == "" {
+		route.Kind = "function"
+	}
+	if route.Name == "" {
+		route.Name = t.Name
+	}
+	return route
+}
+
+func (t *responseTool) clientItem(status string) map[string]any {
+	route := t.clientRoute()
+	if route.Kind == "tool_search" {
+		return map[string]any{
+			"id":        t.ID,
+			"type":      "tool_search_call",
+			"status":    status,
+			"call_id":   t.CallID,
+			"execution": "client",
+			"arguments": parseResponseToolArguments(t.Args),
+		}
+	}
+	item := map[string]any{
+		"id":        t.ID,
+		"type":      "function_call",
+		"status":    status,
+		"call_id":   t.CallID,
+		"name":      route.Name,
+		"arguments": t.Args,
+	}
+	if route.Namespace != "" {
+		item["namespace"] = route.Namespace
+	}
+	return item
+}
+
+func parseResponseToolArguments(raw string) any {
+	if raw == "" {
+		return map[string]any{}
+	}
+	var value any
+	if json.Unmarshal([]byte(raw), &value) == nil {
+		return value
+	}
+	return map[string]any{"query": raw}
 }
 
 func (s *responseState) orderedOutputs() []any {
@@ -149,14 +210,7 @@ func (s *responseState) orderedOutputs() []any {
 		}})
 	}
 	for _, t := range s.Tools {
-		pairs = append(pairs, pair{t.OutputIndex, map[string]any{
-			"id":        t.ID,
-			"type":      "function_call",
-			"status":    "completed",
-			"call_id":   t.CallID,
-			"name":      t.Name,
-			"arguments": t.Args,
-		}})
+		pairs = append(pairs, pair{t.OutputIndex, t.clientItem("completed")})
 	}
 	sort.Slice(pairs, func(i, j int) bool { return pairs[i].index < pairs[j].index })
 	out := make([]any, len(pairs))
@@ -221,7 +275,7 @@ func (s *responseState) applyAggregate(a *aggregate) {
 	s.Usage = a.Usage
 }
 
-func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRequest) {
+func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRequest, routes map[string]protocol.ToolRoute) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "HTTP streaming unsupported")
@@ -232,7 +286,7 @@ func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRe
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	s := newResponseState(req)
+	s := newResponseState(req, routes)
 	meaningfulEvents := 0
 	emit := func(typ string, payload map[string]any) {
 		payload["type"] = typ
@@ -283,34 +337,30 @@ func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRe
 
 		case protocol.EventToolDelta:
 			meaningfulEvents++
-			_, existed := s.Tools[ev.ToolIndex]
 			t := s.ensureTool(ev.ToolIndex, ev.ToolID, ev.ToolName)
-			if !existed {
-				emit("response.output_item.added", map[string]any{
-					"output_index": t.OutputIndex,
-					"item": map[string]any{
-						"id":        t.ID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   t.CallID,
-						"name":      t.Name,
-						"arguments": "",
-					},
-				})
-			}
 			if ev.ToolName != "" {
 				t.Name = ev.ToolName
+				t.Route = s.routeFor(ev.ToolName)
 			}
 			if ev.ToolID != "" {
 				t.CallID = ev.ToolID
 			}
+			if !t.Added && t.Name != "" {
+				t.Added = true
+				emit("response.output_item.added", map[string]any{
+					"output_index": t.OutputIndex,
+					"item":         t.clientItem("in_progress"),
+				})
+			}
 			if ev.ToolArguments != "" {
 				t.Args += ev.ToolArguments
-				emit("response.function_call_arguments.delta", map[string]any{
-					"item_id":      t.ID,
-					"output_index": t.OutputIndex,
-					"delta":        ev.ToolArguments,
-				})
+				if t.clientRoute().Kind != "tool_search" {
+					emit("response.function_call_arguments.delta", map[string]any{
+						"item_id":      t.ID,
+						"output_index": t.OutputIndex,
+						"delta":        ev.ToolArguments,
+					})
+				}
 			}
 
 		case protocol.EventUsage:
@@ -370,22 +420,29 @@ func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRe
 	sort.Ints(keys)
 	for _, k := range keys {
 		t := s.Tools[k]
-		emit("response.function_call_arguments.done", map[string]any{
-			"item_id":      t.ID,
-			"output_index": t.OutputIndex,
-			"name":         t.Name,
-			"arguments":    t.Args,
-		})
+		if !t.Added {
+			t.Added = true
+			emit("response.output_item.added", map[string]any{
+				"output_index": t.OutputIndex,
+				"item":         t.clientItem("in_progress"),
+			})
+		}
+		if t.clientRoute().Kind != "tool_search" {
+			route := t.clientRoute()
+			done := map[string]any{
+				"item_id":      t.ID,
+				"output_index": t.OutputIndex,
+				"name":         route.Name,
+				"arguments":    t.Args,
+			}
+			if route.Namespace != "" {
+				done["namespace"] = route.Namespace
+			}
+			emit("response.function_call_arguments.done", done)
+		}
 		emit("response.output_item.done", map[string]any{
 			"output_index": t.OutputIndex,
-			"item": map[string]any{
-				"id":        t.ID,
-				"type":      "function_call",
-				"status":    "completed",
-				"call_id":   t.CallID,
-				"name":      t.Name,
-				"arguments": t.Args,
-			},
+			"item":         t.clientItem("completed"),
 		})
 	}
 
