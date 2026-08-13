@@ -36,10 +36,11 @@ type QueueInfo struct {
 }
 
 type Client struct {
-	HTTP       *http.Client
-	Cred       credential.Credential
-	QueueRetry QueueRetryPolicy
-	queueWait  func(context.Context, time.Duration) error
+	HTTP          *http.Client
+	Cred          credential.Credential
+	QueueRetry    QueueRetryPolicy
+	UsageObserver func(protocol.Usage)
+	queueWait     func(context.Context, time.Duration) error
 }
 
 func NewClient(httpClient *http.Client, cred credential.Credential) *Client {
@@ -299,6 +300,9 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		message := strings.TrimSpace(string(data))
 		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
 		return nil, fmt.Errorf("qoder chat returned HTTP %d: %s", resp.StatusCode, message)
+	}
+	if c.UsageObserver != nil {
+		resp.Body = observeUsageBody(resp.Body, c.UsageObserver)
 	}
 	return resp, nil
 }
