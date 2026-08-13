@@ -10,8 +10,9 @@ import (
 
 // normalizeQoderRequest keeps the adapter-produced OpenAI tool protocol intact.
 // Qoder's agent chat endpoint accepts assistant.tool_calls followed by role=tool
-// messages. This pass repairs malformed history and also reminds Qoder that the
-// request's function schemas are the executable client tool namespace.
+// messages. This pass repairs malformed history for every compatible adapter.
+// Claude Code's extra tool-namespace reminder is opt-in and must never leak into
+// the OpenAI protocol adapters.
 func normalizeQoderRequest(req protocol.Request) protocol.Request {
 	if len(req.Messages) > 0 {
 		messagesBefore := len(req.Messages)
@@ -30,15 +31,17 @@ func normalizeQoderRequest(req protocol.Request) protocol.Request {
 		}
 	}
 
-	toolNames := qoderToolNames(req.Tools)
-	if len(toolNames) > 0 {
-		req.System = appendQoderToolConstraint(req.System, toolNames)
-		slog.Info("qoder tool availability",
-			"tools", len(toolNames),
-			"bash_available", containsString(toolNames, "Bash"),
-			"tool_search_available", containsString(toolNames, "ToolSearch"),
-		)
-		slog.Debug("qoder advertised tools", "tool_names", toolNames)
+	if req.ClaudeToolCompatibility {
+		toolNames := qoderToolNames(req.Tools)
+		if len(toolNames) > 0 {
+			req.System = appendQoderToolConstraint(req.System, toolNames)
+			slog.Info("qoder tool availability",
+				"tools", len(toolNames),
+				"bash_available", containsString(toolNames, "Bash"),
+				"tool_search_available", containsString(toolNames, "ToolSearch"),
+			)
+			slog.Debug("qoder advertised tools", "tool_names", toolNames)
+		}
 	}
 	return req
 }
