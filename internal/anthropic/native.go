@@ -153,18 +153,19 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 	)
 
 	return protocol.Request{
-		PublicModel:     req.Model,
-		ModelID:         model.UpstreamID,
-		ModelConfig:     model.Raw,
-		ReasoningEffort: reasoningEffort,
-		System:          system,
-		Messages:        messages,
-		Tools:           tools,
-		MaxTokens:       req.MaxTokens,
-		Temperature:     req.Temperature,
-		TopP:            req.TopP,
-		Stop:            stop,
-		LastUserText:    lastUser,
+		PublicModel:              req.Model,
+		ModelID:                  model.UpstreamID,
+		ModelConfig:              model.Raw,
+		ReasoningEffort:          reasoningEffort,
+		System:                   system,
+		Messages:                 messages,
+		Tools:                    tools,
+		MaxTokens:                req.MaxTokens,
+		Temperature:              req.Temperature,
+		TopP:                     req.TopP,
+		Stop:                     stop,
+		LastUserText:             lastUser,
+		ClaudeToolCompatibility: true,
 	}, nil
 }
 
