@@ -49,11 +49,33 @@ jobs:
         shell: pwsh
         run: ./scripts/build-desktop.ps1
 
+      - name: Build headless proxy executable
+        shell: pwsh
+        run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-windows-amd64.exe ./cmd/qoder-proxy
+
+      - name: Build lightweight service executable
+        shell: pwsh
+        run: go build -trimpath -ldflags="-H=windowsgui -s -w" -o dist/qoder-proxy-service-windows-amd64.exe ./cmd/qoder-proxy-service
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: qoder-proxy-windows-amd64
           path: dist/qoder-proxy-desktop-windows-amd64.exe
+          if-no-files-found: error
+
+      - name: Upload Windows headless artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-headless-windows-amd64
+          path: dist/qoder-proxy-headless-windows-amd64.exe
+          if-no-files-found: error
+
+      - name: Upload Windows service artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-service-windows-amd64
+          path: dist/qoder-proxy-service-windows-amd64.exe
           if-no-files-found: error
 
   linux:
@@ -81,14 +103,24 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev \
             libxcursor-dev libxfixes-dev
 
-      - name: Build Linux executable
+      - name: Build Linux desktop executable
         run: ./scripts/build-desktop.sh
+
+      - name: Build Linux lightweight service executable
+        run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-service-linux-amd64 ./cmd/qoder-proxy-service
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: qoder-proxy-linux-amd64
           path: dist/qoder-proxy-desktop-linux-amd64
+          if-no-files-found: error
+
+      - name: Upload Linux service artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-service-linux-amd64
+          path: dist/qoder-proxy-service-linux-amd64
           if-no-files-found: error
 
   release:

@@ -104,6 +104,8 @@ func runDesktop() error {
 		fmt.Fprintln(os.Stderr, "persistent logging unavailable:", err)
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, lb), &slog.HandlerOptions{Level: slog.LevelDebug})))
+	stopMemoryDiagnostics := startMemoryDiagnostics()
+	defer stopMemoryDiagnostics()
 	st, err := credential.New(dataPaths.Credentials)
 	if err != nil {
 		return err
@@ -156,15 +158,6 @@ func runDesktop() error {
 	}()
 	th := material.NewTheme()
 	var ops op.Ops
-	ticker := time.NewTicker(750 * time.Millisecond)
-	defer ticker.Stop()
-	go func() {
-		for range ticker.C {
-			if s.win != nil {
-				s.win.Invalidate()
-			}
-		}
-	}()
 	for {
 		switch e := w.Event().(type) {
 		case app.DestroyEvent:
@@ -174,7 +167,7 @@ func runDesktop() error {
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
 			s.handleClicks(gtx)
-			s.layout(gtx, th)
+			s.renderFrame(gtx, th)
 			e.Frame(gtx.Ops)
 		default:
 			s.handlePlatformWindowEvent(e)
