@@ -70,7 +70,7 @@ const unifiedDashboardHTML = `<!doctype html>
           <button id="logout" class="btn ghost-danger" onclick="logout(this)">退出账号</button>
           <button class="btn danger" onclick="shutdownService(this)">退出服务</button>
         </div>
-        <div class="notice">运行参数通过“配置 → 保存并应用”生效；监听地址变更需要退出服务并重新启动。</div>
+        <div class="notice">运行参数通过“配置 → 保存并应用”生效；监听地址变更需要退出服务后重新启动。</div>
         <div id="overviewError" class="error"></div>
       </div>
     </div>
