@@ -6,24 +6,22 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/steamwo/qoder-proxy/internal/desktop"
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	openBrowser := true
-	controlListen := ""
+	shutdown := false
 	for _, arg := range os.Args[1:] {
-		switch {
-		case arg == "--no-browser":
+		switch arg {
+		case "--no-browser":
 			openBrowser = false
-		case len(arg) > len("--control=") && arg[:len("--control=")] == "--control=":
-			controlListen = arg[len("--control="):]
-		case arg == "--help" || arg == "-h":
-			fmt.Println("usage: qoder-proxy-service [--no-browser] [--control=127.0.0.1:39091]")
+		case "--shutdown":
+			shutdown = true
+		case "--help", "-h":
+			fmt.Println("usage: qoder-proxy-service [--no-browser] [--shutdown]")
 			return
 		default:
 			fmt.Fprintln(os.Stderr, "unknown option:", arg)
@@ -31,10 +29,19 @@ func main() {
 		}
 	}
 
-	if err := desktop.RunBackgroundService(ctx, desktop.ServiceOptions{
-		ControlListen: controlListen,
-		OpenBrowser:   openBrowser,
-	}); err != nil {
+	if shutdown {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := desktop.ShutdownUnifiedService(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "qoder-proxy-service shutdown:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := desktop.RunUnifiedService(ctx, desktop.UnifiedServiceOptions{OpenBrowser: openBrowser}); err != nil {
 		fmt.Fprintln(os.Stderr, "qoder-proxy-service:", err)
 		os.Exit(1)
 	}
