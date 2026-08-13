@@ -2,6 +2,7 @@ package server
 
 import (
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/steamwo/qoder-proxy/internal/protocol"
@@ -9,29 +10,84 @@ import (
 
 // normalizeQoderRequest keeps the adapter-produced OpenAI tool protocol intact.
 // Qoder's agent chat endpoint accepts assistant.tool_calls followed by role=tool
-// messages; converting those back into Anthropic tool_use/tool_result blocks
-// breaks multi-turn agent loops. This pass only repairs malformed history that
-// can appear after client-side context compaction.
+// messages. This pass repairs malformed history and also makes Claude Code's
+// per-turn tool availability explicit so Qoder does not call deferred/disabled
+// tools that are not actually executable in the current client context.
 func normalizeQoderRequest(req protocol.Request) protocol.Request {
-	if len(req.Messages) == 0 {
-		return req
+	if len(req.Messages) > 0 {
+		messagesBefore := len(req.Messages)
+		messages, stats := canonicalizeQoderToolHistory(req.Messages)
+		if stats.missingToolResults > 0 || stats.reorderedToolResults > 0 {
+			req.Messages = messages
+			slog.Warn("qoder tool history repaired",
+				"missing_tool_results", stats.missingToolResults,
+				"reordered_tool_results", stats.reorderedToolResults,
+				"tool_calls", stats.toolCalls,
+				"tool_results", stats.toolResults,
+				"messages_before", messagesBefore,
+				"messages_after", len(messages),
+				"tail_roles", tailMessageRoles(messages, 8),
+			)
+		}
 	}
 
-	messagesBefore := len(req.Messages)
-	messages, stats := canonicalizeQoderToolHistory(req.Messages)
-	if stats.missingToolResults > 0 || stats.reorderedToolResults > 0 {
-		req.Messages = messages
-		slog.Warn("qoder tool history repaired",
-			"missing_tool_results", stats.missingToolResults,
-			"reordered_tool_results", stats.reorderedToolResults,
-			"tool_calls", stats.toolCalls,
-			"tool_results", stats.toolResults,
-			"messages_before", messagesBefore,
-			"messages_after", len(messages),
-			"tail_roles", tailMessageRoles(messages, 8),
+	toolNames := qoderToolNames(req.Tools)
+	if len(toolNames) > 0 {
+		req.System = appendQoderToolConstraint(req.System, toolNames)
+		slog.Info("qoder tool availability",
+			"tools", len(toolNames),
+			"bash_available", containsString(toolNames, "Bash"),
+			"tool_search_available", containsString(toolNames, "ToolSearch"),
 		)
+		slog.Debug("qoder advertised tools", "tool_names", toolNames)
 	}
 	return req
+}
+
+func qoderToolNames(tools []any) []string {
+	seen := make(map[string]struct{}, len(tools))
+	names := make([]string, 0, len(tools))
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, _ := tool["function"].(map[string]any)
+		name := strings.TrimSpace(stringValue(fn["name"]))
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func appendQoderToolConstraint(system string, toolNames []string) string {
+	if len(toolNames) == 0 {
+		return system
+	}
+	constraint := "[qoder-proxy tool availability]\n" +
+		"The executable tools for this turn are exactly: " + strings.Join(toolNames, ", ") + ".\n" +
+		"Only emit tool calls whose name exactly matches one of those tools. Do not call a tool merely because it appeared in earlier context or in generic coding-agent instructions. " +
+		"If Bash or another desired tool is absent, do not call it. If ToolSearch is available, use ToolSearch to load a deferred tool before attempting that tool. Otherwise continue with the available tools."
+	if strings.TrimSpace(system) == "" {
+		return constraint
+	}
+	return strings.TrimRight(system, "\n") + "\n\n" + constraint
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 type toolHistoryStats struct {
