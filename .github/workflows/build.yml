@@ -49,11 +49,22 @@ jobs:
         shell: pwsh
         run: ./scripts/build-desktop.ps1
 
+      - name: Build headless proxy executable
+        shell: pwsh
+        run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-windows-amd64.exe ./cmd/qoder-proxy
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: qoder-proxy-windows-amd64
           path: dist/qoder-proxy-desktop-windows-amd64.exe
+          if-no-files-found: error
+
+      - name: Upload Windows headless artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-headless-windows-amd64
+          path: dist/qoder-proxy-headless-windows-amd64.exe
           if-no-files-found: error
 
   linux:
@@ -68,7 +79,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+        cache: true
 
       - name: Install Gio desktop dependencies
         run: |
