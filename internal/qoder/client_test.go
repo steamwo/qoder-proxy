@@ -2,6 +2,7 @@ package qoder
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,14 +19,55 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func decodeQoderBodyForTest(t *testing.T, encoded []byte) []byte {
+	t.Helper()
+	if len(encoded) == 0 {
+		t.Fatal("empty encoded body")
+	}
+	reverse := [256]byte{}
+	seen := [256]bool{}
+	for i := 0; i < len(qoderStdAlphabet); i++ {
+		reverse[qoderCustomAlphabet[i]] = qoderStdAlphabet[i]
+		seen[qoderCustomAlphabet[i]] = true
+	}
+	reverse['$'] = '='
+	seen['$'] = true
+
+	rearranged := make([]byte, len(encoded))
+	for i, c := range encoded {
+		if seen[c] {
+			rearranged[i] = reverse[c]
+		} else {
+			rearranged[i] = c
+		}
+	}
+	n := len(rearranged)
+	a := n / 3
+	std := append([]byte{}, rearranged[n-a:]...)
+	std = append(std, rearranged[a:n-a]...)
+	std = append(std, rearranged[:a]...)
+	decoded, err := base64.StdEncoding.DecodeString(string(std))
+	if err != nil {
+		t.Fatalf("decode qoder body: %v", err)
+	}
+	return decoded
+}
+
 func TestChatSendsEmptyToolsArrayWhenOmitted(t *testing.T) {
 	var body map[string]any
 	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Query().Get("Encode") != "1" {
+			t.Fatalf("missing Encode=1 in URL: %s", r.URL.String())
+		}
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(b, &body); err != nil {
+		if json.Valid(b) {
+			t.Fatal("Qoder request body must be encoded, not plaintext JSON")
+		}
+		plain := decodeQoderBodyForTest(t, b)
+		if err := json.Unmarshal(plain, &body); err != nil {
 			t.Fatal(err)
 		}
 		return &http.Response{
@@ -143,7 +185,8 @@ func TestChatSendsReasoningEffortParameter(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(b, &body); err != nil {
+		plain := decodeQoderBodyForTest(t, b)
+		if err := json.Unmarshal(plain, &body); err != nil {
 			t.Fatal(err)
 		}
 		return &http.Response{
@@ -191,7 +234,8 @@ func TestChatOmitsReasoningEffortWhenNormalizedAway(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := json.Unmarshal(b, &body); err != nil {
+		plain := decodeQoderBodyForTest(t, b)
+		if err := json.Unmarshal(plain, &body); err != nil {
 			t.Fatal(err)
 		}
 		return &http.Response{
