@@ -17,8 +17,6 @@
 
 **作者：steamwo**
 
-上述声明用于说明项目性质与风险边界，并不构成法律意见，也不能保证在任何司法辖区当然免除责任。
-
 ## 主要功能
 
 - OpenAI Chat Completions：`POST /v1/chat/completions`
