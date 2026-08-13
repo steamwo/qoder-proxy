@@ -19,9 +19,9 @@ type Request struct {
 	Stop            any
 	LastUserText    string
 	// ClaudeToolCompatibility enables the Claude Code-specific Qoder tool
-	// namespace guard and history repair. OpenAI protocol adapters intentionally
-	// leave this false so Anthropic compatibility behavior cannot leak into
-	// /v1/chat/completions or /v1/responses.
+	// namespace reminder and response guard. OpenAI protocol adapters
+	// intentionally leave this false so Claude ToolSearch behavior cannot leak
+	// into /v1/chat/completions or /v1/responses.
 	ClaudeToolCompatibility bool
 }
 
