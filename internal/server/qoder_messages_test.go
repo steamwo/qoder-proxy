@@ -6,7 +6,7 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/protocol"
 )
 
-func TestNormalizeQoderRequestMapsCompleteToolRoundTrip(t *testing.T) {
+func TestNormalizeQoderRequestPreservesCanonicalToolRoundTrip(t *testing.T) {
 	req := protocol.Request{Messages: []map[string]any{
 		{
 			"role":    "assistant",
@@ -22,68 +22,75 @@ func TestNormalizeQoderRequestMapsCompleteToolRoundTrip(t *testing.T) {
 	}}
 
 	got := normalizeQoderRequest(req)
-	if len(got.Messages) != 2 {
+	if len(got.Messages) != 4 {
 		t.Fatalf("messages=%#v", got.Messages)
 	}
-
 	assistant := got.Messages[0]
 	if assistant["role"] != "assistant" {
-		t.Fatalf("assistant role=%#v", assistant["role"])
+		t.Fatalf("assistant=%#v", assistant)
 	}
-	if _, exists := assistant["tool_calls"]; exists {
-		t.Fatalf("OpenAI tool_calls leaked to Qoder: %#v", assistant)
+	calls, ok := assistant["tool_calls"].([]any)
+	if !ok || len(calls) != 2 {
+		t.Fatalf("canonical tool_calls were changed: %#v", assistant)
 	}
-	assistantBlocks, ok := assistant["content"].([]any)
-	if !ok || len(assistantBlocks) != 3 {
-		t.Fatalf("assistant content=%#v", assistant["content"])
+	if got.Messages[1]["role"] != "tool" || got.Messages[1]["tool_call_id"] != "call_1" {
+		t.Fatalf("first tool result=%#v", got.Messages[1])
 	}
-	textBlock := assistantBlocks[0].(map[string]any)
-	if textBlock["type"] != "text" || textBlock["text"] != "Checking weather" {
-		t.Fatalf("assistant text=%#v", textBlock)
+	if got.Messages[2]["role"] != "tool" || got.Messages[2]["tool_call_id"] != "call_2" {
+		t.Fatalf("second tool result=%#v", got.Messages[2])
 	}
-	firstUse := assistantBlocks[1].(map[string]any)
-	if firstUse["type"] != "tool_use" || firstUse["id"] != "call_1" || firstUse["name"] != "weather" {
-		t.Fatalf("first tool use=%#v", firstUse)
-	}
-	input, ok := firstUse["input"].(map[string]any)
-	if !ok || input["city"] != "Tokyo" {
-		t.Fatalf("first tool input=%#v", firstUse["input"])
-	}
-
-	user := got.Messages[1]
-	if user["role"] != "user" {
-		t.Fatalf("user role=%#v", user["role"])
-	}
-	userBlocks, ok := user["content"].([]any)
-	if !ok || len(userBlocks) != 3 {
-		t.Fatalf("user content=%#v", user["content"])
-	}
-	firstResult := userBlocks[0].(map[string]any)
-	secondResult := userBlocks[1].(map[string]any)
-	followingText := userBlocks[2].(map[string]any)
-	if firstResult["type"] != "tool_result" || firstResult["tool_use_id"] != "call_1" || firstResult["content"] != "sunny" || firstResult["is_error"] != false {
-		t.Fatalf("first result=%#v", firstResult)
-	}
-	if secondResult["type"] != "tool_result" || secondResult["tool_use_id"] != "call_2" || secondResult["content"] != "14:00" {
-		t.Fatalf("second result=%#v", secondResult)
-	}
-	if followingText["type"] != "text" || followingText["text"] != "continue" {
-		t.Fatalf("following text=%#v", followingText)
+	if got.Messages[3]["role"] != "user" || got.Messages[3]["content"] != "continue" {
+		t.Fatalf("following user=%#v", got.Messages[3])
 	}
 }
 
-func TestNormalizeQoderRequestMapsToolRoleWithoutFollowingUser(t *testing.T) {
+func TestNormalizeQoderRequestMovesToolResultBeforeInterleavedUserText(t *testing.T) {
 	req := protocol.Request{Messages: []map[string]any{
-		{"role": "assistant", "content": "calling", "tool_calls": []any{map[string]any{"id": "call_1", "function": map[string]any{"name": "weather", "arguments": `{}`}}}},
-		{"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+		{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{"id": "call_1", "type": "function", "function": map[string]any{"name": "grep", "arguments": `{}`}}}},
+		{"role": "user", "content": "<system-reminder>continue exploring</system-reminder>"},
+		{"role": "tool", "tool_call_id": "call_1", "content": "match"},
+		{"role": "assistant", "content": "next"},
 	}}
+
 	got := normalizeQoderRequest(req)
-	if len(got.Messages) != 2 || got.Messages[1]["role"] != "user" {
+	if len(got.Messages) != 4 {
 		t.Fatalf("messages=%#v", got.Messages)
 	}
-	blocks, ok := got.Messages[1]["content"].([]any)
-	if !ok || len(blocks) != 1 {
-		t.Fatalf("tool feedback=%#v", got.Messages[1])
+	if got.Messages[1]["role"] != "tool" || got.Messages[1]["tool_call_id"] != "call_1" {
+		t.Fatalf("tool result was not moved next to tool_calls: %#v", got.Messages)
+	}
+	if got.Messages[2]["role"] != "user" {
+		t.Fatalf("user reminder should follow tool result: %#v", got.Messages)
+	}
+}
+
+func TestNormalizeQoderRequestFillsMissingToolResult(t *testing.T) {
+	req := protocol.Request{Messages: []map[string]any{
+		{
+			"role": "assistant",
+			"tool_calls": []any{
+				map[string]any{"id": "call_1", "type": "function", "function": map[string]any{"name": "grep", "arguments": `{}`}},
+				map[string]any{"id": "call_2", "type": "function", "function": map[string]any{"name": "glob", "arguments": `{}`}},
+			},
+		},
+		{"role": "tool", "tool_call_id": "call_1", "content": "match"},
+		{"role": "user", "content": "continue"},
+		{"role": "assistant", "content": "next"},
+	}}
+
+	got := normalizeQoderRequest(req)
+	if len(got.Messages) != 5 {
+		t.Fatalf("messages=%#v", got.Messages)
+	}
+	if got.Messages[1]["role"] != "tool" || got.Messages[1]["tool_call_id"] != "call_1" {
+		t.Fatalf("existing tool result changed: %#v", got.Messages)
+	}
+	missing := got.Messages[2]
+	if missing["role"] != "tool" || missing["tool_call_id"] != "call_2" || missing["content"] != "[No response received]" {
+		t.Fatalf("missing tool result not repaired: %#v", missing)
+	}
+	if got.Messages[3]["role"] != "user" {
+		t.Fatalf("user message should remain after tool results: %#v", got.Messages)
 	}
 }
 
