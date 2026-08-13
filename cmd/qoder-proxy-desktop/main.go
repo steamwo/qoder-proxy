@@ -174,7 +174,7 @@ func runDesktop() error {
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
 			s.handleClicks(gtx)
-			s.layout(gtx, th)
+			s.renderFrame(gtx, th)
 			e.Frame(gtx.Ops)
 		default:
 			s.handlePlatformWindowEvent(e)
