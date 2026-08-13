@@ -82,7 +82,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/models", s.models)
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { openai.HandleChat(w, r, s.Backend) })
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) { openai.HandleResponses(w, r, s.Backend) })
-	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { anthropic.HandleMessages(w, r, s.Backend) })
+	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { anthropic.HandleMessagesCompatible(w, r, s.Backend) })
 	return s.accessLog(s.cors(s.auth(mux)))
 }
 
