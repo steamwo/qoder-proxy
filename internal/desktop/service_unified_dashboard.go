@@ -22,6 +22,7 @@ const unifiedDashboardHTML = `<!doctype html>
     <button class="tab" data-tab="settings">配置</button>
     <button class="tab" data-tab="models">模型</button>
     <button class="tab" data-tab="logs">日志</button>
+    <button class="tab" data-tab="disclaimer">免责声明</button>
   </div>
 
   <section id="overview" class="panel active">
@@ -110,6 +111,18 @@ const unifiedDashboardHTML = `<!doctype html>
       </div>
       <div id="logError" class="error"></div>
       <div id="logbox" class="logbox">读取日志…</div>
+    </div>
+  </section>
+
+  <section id="disclaimer" class="panel">
+    <div class="card">
+      <div class="status-title">免责声明</div>
+      <div class="notice" style="margin-bottom:16px">本项目由 <strong>steamwo</strong> 独立维护，是非官方、非盈利的技术研究与兼容性项目。</div>
+      <div class="fact" style="margin-bottom:10px"><div class="k">非官方项目</div><div class="muted" style="line-height:1.7">本项目与 Qoder 及其运营方、关联公司不存在隶属、合作、赞助、授权或认可关系。Qoder 及相关名称、商标、服务和产品的权利归其各自权利人所有。</div></div>
+      <div class="fact" style="margin-bottom:10px"><div class="k">使用风险</div><div class="muted" style="line-height:1.7">本项目按“现状”提供，不承诺可用性、稳定性、持续兼容性或适用于任何特定目的。上游接口、账号策略、服务条款和风控规则可能随时变化。</div></div>
+      <div class="fact" style="margin-bottom:10px"><div class="k">责任边界</div><div class="muted" style="line-height:1.7">使用者应自行确认并遵守 Qoder、模型提供方及所在地区适用的服务条款、法律法规和账号政策。因使用本项目产生的账号限制、封禁、额度损失、数据丢失、业务中断、第三方索赔或其他直接/间接损失，由使用者自行承担风险；在适用法律允许的最大范围内，作者不承担由使用或无法使用本项目产生的责任。</div></div>
+      <div class="fact"><div class="k">禁止滥用</div><div class="muted" style="line-height:1.7">本项目不鼓励也不应被用于绕过付费、配额、访问控制、风控措施，或从事滥用、攻击、欺诈等行为。该声明用于说明项目性质与风险边界，不构成法律意见，也不能保证在任何司法辖区当然免除责任。</div></div>
+      <div class="notice" style="margin-top:16px">作者：steamwo</div>
     </div>
   </section>
 </div>
