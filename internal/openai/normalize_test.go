@@ -25,6 +25,9 @@ func TestNormalizeChatKeepsPublicAndUpstreamModelSeparate(t *testing.T) {
 	if got.System != "be concise" || got.LastUserText != "hello" {
 		t.Fatalf("normalization wrong: %#v", got)
 	}
+	if got.ClaudeToolCompatibility {
+		t.Fatal("Chat Completions must not opt into Claude Code tool compatibility")
+	}
 }
 
 func TestNormalizeResponsesTools(t *testing.T) {
@@ -51,6 +54,9 @@ func TestNormalizeResponsesTools(t *testing.T) {
 	fn := tool["function"].(map[string]any)
 	if fn["name"] != "weather" {
 		t.Fatalf("tool=%#v", tool)
+	}
+	if got.ClaudeToolCompatibility {
+		t.Fatal("Responses must not opt into Claude Code tool compatibility")
 	}
 }
 

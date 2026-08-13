@@ -22,6 +22,7 @@ const unifiedDashboardHTML = `<!doctype html>
     <button class="tab" data-tab="settings">配置</button>
     <button class="tab" data-tab="models">模型</button>
     <button class="tab" data-tab="logs">日志</button>
+    <button class="tab" data-tab="disclaimer">说明</button>
   </div>
 
   <section id="overview" class="panel active">
@@ -35,8 +36,8 @@ const unifiedDashboardHTML = `<!doctype html>
         <div class="facts">
           <div class="fact"><div class="k">暴露端点</div><div id="endpoint" class="v big endpoint">—</div><div id="endpointHint" class="muted">接口端点可在下方直接复制完整 URL</div></div>
           <div class="fact"><div class="k">运行时长</div><div id="uptime" class="v big">—</div></div>
-          <div class="fact"><div class="k">Runtime Sys</div><div id="memory" class="v big">—</div></div>
-          <div class="fact"><div class="k">Go Heap</div><div id="heap" class="v big">—</div></div>
+          <div class="fact"><div class="k">内存</div><div id="memory" class="v big">—</div></div>
+          <div class="fact"><div class="k">Token 用量</div><div id="tokenTotal" class="v big">—</div><div id="tokenDetail" class="muted">本次运行 · 暂无上游统计</div></div>
         </div>
         <div class="apis">
           <button class="api" data-path="/v1/models" onclick="copyAPIEndpoint(this)" title="点击复制完整 URL"><span>GET /v1/models</span><span class="api-copy">复制</span></button>
@@ -112,6 +113,19 @@ const unifiedDashboardHTML = `<!doctype html>
       <div id="logbox" class="logbox">读取日志…</div>
     </div>
   </section>
+
+  <section id="disclaimer" class="panel">
+    <div class="card">
+      <div class="status-title">项目说明与免责声明</div>
+      <div class="muted" style="line-height:1.85;margin-top:14px">
+        <p><strong>项目性质：</strong>本项目由 <strong>steamwo</strong> 独立维护，是非官方、非盈利的技术研究与兼容性项目，与 Qoder 及其运营方、关联公司不存在隶属、合作、赞助、授权或认可关系。Qoder 及相关名称、商标、服务和产品的权利归其各自权利人所有。</p>
+        <p><strong>使用风险：</strong>本项目按“现状”提供，不承诺可用性、稳定性、持续兼容性或适用于任何特定目的。上游接口、账号策略、服务条款和风控规则可能随时变化。</p>
+        <p><strong>责任边界：</strong>使用者应自行确认并遵守 Qoder、模型提供方及所在地区适用的服务条款、法律法规和账号政策。因使用本项目产生的账号限制、封禁、额度损失、数据丢失、业务中断、第三方索赔或其他直接/间接损失，由使用者自行承担风险；在适用法律允许的最大范围内，作者不承担由使用或无法使用本项目产生的责任。</p>
+        <p><strong>禁止滥用：</strong>本项目不鼓励也不应被用于绕过付费、配额、访问控制、风控措施，或从事滥用、攻击、欺诈等行为。</p>
+        <p style="margin-bottom:0"><strong>作者：</strong>steamwo</p>
+      </div>
+    </div>
+  </section>
 </div>
 <div id="toastStack" class="toast-stack" aria-live="polite" aria-atomic="true"></div>
 <script>
@@ -122,12 +136,13 @@ function duration(sec){sec=Math.max(0,Number(sec)||0);var h=Math.floor(sec/3600)
 function err(id,text){var e=document.getElementById(id);e.textContent=text||'';e.style.display=text?'block':'none';}
 function fmtDate(v){if(!v)return '—';var d=new Date(v);if(isNaN(d.getTime()))return v;return d.toLocaleString();}
 function fmtNum(v){var n=Number(v);if(!isFinite(n))return '—';return n.toLocaleString(undefined,{maximumFractionDigits:1});}
+function fmtTokens(v){var n=Number(v);if(!isFinite(n)||n<=0)return '—';if(n>=1000000){var m=n/1000000;return m.toLocaleString(undefined,{minimumFractionDigits:m<10?2:1,maximumFractionDigits:m<10?2:1})+'M';}if(n>=1000){var k=n/1000;return k.toLocaleString(undefined,{minimumFractionDigits:k<10?2:1,maximumFractionDigits:k<10?2:1})+'K';}return Math.round(n).toLocaleString();}
 function notify(text,type){if(!text)return;var stack=document.getElementById('toastStack');var el=document.createElement('div');el.className='toast '+(type||'info');el.textContent=text;stack.appendChild(el);setTimeout(function(){el.style.opacity='0';el.style.transform='translateY(6px)';setTimeout(function(){if(el.parentNode)el.parentNode.removeChild(el);},180);},2800);}
 function buttonBusy(btn,text){if(!btn)return function(){};var old=btn.textContent;var wasDisabled=btn.disabled;btn.disabled=true;btn.classList.add('busy');btn.textContent=text;return function(){btn.textContent=old;btn.classList.remove('busy');btn.disabled=wasDisabled;};}
 async function jsonFetch(url,opt){var r=await fetch(url,opt||{cache:'no-store'});var j=await r.json();if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
 async function copyText(text){if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(text);return;}var t=document.createElement('textarea');t.value=text;t.style.position='fixed';t.style.opacity='0';document.body.appendChild(t);t.select();var ok=document.execCommand('copy');document.body.removeChild(t);if(!ok)throw new Error('浏览器不允许复制');}
 async function copyAPIEndpoint(btn){if(!currentEndpoint)return;var path=btn.getAttribute('data-path')||'';var url=currentEndpoint+path;var badge=btn.querySelector('.api-copy');var old=badge?badge.textContent:'复制';btn.disabled=true;if(badge)badge.textContent='复制中';try{await copyText(url);if(badge)badge.textContent='已复制';notify('已复制：'+url,'success');}catch(e){notify('复制失败：'+(e.message||String(e)),'error-toast');}finally{setTimeout(function(){if(badge)badge.textContent=old;btn.disabled=false;},700);}}
-async function refresh(){try{var s=await jsonFetch('/admin/api/status');var st=document.getElementById('state');st.className='state'+(s.running?' on':'');st.textContent=s.running?'代理运行中':'代理已停止';var ep=s.proxy_address||s.configured_listen||'—';currentEndpoint=ep==='—'?'':'http://'+ep;document.getElementById('endpoint').textContent=currentEndpoint||'—';document.getElementById('endpointHint').textContent=s.restart_required?'当前仍使用此端点；新监听地址将在服务重启后生效':'接口端点可在下方直接复制完整 URL';document.querySelectorAll('.api').forEach(function(b){b.disabled=!currentEndpoint;});document.getElementById('uptime').textContent=s.running?duration(s.uptime_seconds):'—';document.getElementById('memory').textContent=s.runtime_sys_mb+' MB';document.getElementById('heap').textContent=s.heap_alloc_mb+' MB';document.getElementById('start').disabled=busy||s.running;document.getElementById('stop').disabled=busy||!s.running;document.getElementById('logout').disabled=busy||!s.credential_ready;document.getElementById('account').textContent=s.credential_email||(s.credential_ready?'已授权':'未授权');document.getElementById('accountName').textContent=s.credential_name||(!s.credential_ready?'请先完成 Qoder 授权':'');if(!s.credential_ready){resetQuota('未授权');}}catch(e){err('overviewError',e.message||String(e));}}
+async function refresh(){try{var s=await jsonFetch('/admin/api/status');var st=document.getElementById('state');st.className='state'+(s.running?' on':'');st.textContent=s.running?'代理运行中':'代理已停止';var ep=s.proxy_address||s.configured_listen||'—';currentEndpoint=ep==='—'?'':'http://'+ep;document.getElementById('endpoint').textContent=currentEndpoint||'—';document.getElementById('endpointHint').textContent=s.restart_required?'当前仍使用此端点；新监听地址将在服务重启后生效':'接口端点可在下方直接复制完整 URL';document.querySelectorAll('.api').forEach(function(b){b.disabled=!currentEndpoint;});document.getElementById('uptime').textContent=s.running?duration(s.uptime_seconds):'—';document.getElementById('memory').textContent=(Number(s.memory_mb)||0)+' MB';var total=Number(s.token_total)||0;document.getElementById('tokenTotal').textContent=fmtTokens(total);document.getElementById('tokenDetail').textContent=total>0?('本次运行 · 输入 '+fmtTokens(s.token_input)+' · 输出 '+fmtTokens(s.token_output)):'本次运行 · 暂无上游统计';document.getElementById('start').disabled=busy||s.running;document.getElementById('stop').disabled=busy||!s.running;document.getElementById('logout').disabled=busy||!s.credential_ready;document.getElementById('account').textContent=s.credential_email||(s.credential_ready?'已授权':'未授权');document.getElementById('accountName').textContent=s.credential_name||(!s.credential_ready?'请先完成 Qoder 授权':'');if(!s.credential_ready){resetQuota('未授权');}}catch(e){err('overviewError',e.message||String(e));}}
 function resetQuota(text){document.getElementById('plan').textContent=text||'—';document.getElementById('quotaPercent').textContent='—';document.getElementById('quotaFill').style.width='0%';document.getElementById('quotaReset').textContent='—';document.getElementById('quotaRaw').textContent='—';document.getElementById('quotaFetched').textContent='—';}
 async function refreshQuota(btn){var done=buttonBusy(btn,'刷新中…');try{var q=await jsonFetch('/admin/api/quota');document.getElementById('plan').textContent=q.plan||'Qoder';var limit=Number(q.user_limit);var remaining=Number(q.user_remaining);var p=NaN;if(limit>0&&isFinite(remaining)){remaining=Math.max(0,Math.min(limit,remaining));p=remaining/limit*100;}else{p=Number(q.user_remaining_percent);}var safeP=isFinite(p)?Math.max(0,Math.min(100,p)):NaN;document.getElementById('quotaPercent').textContent=isFinite(safeP)?(safeP.toFixed(1)+'% 剩余'):'—';document.getElementById('quotaFill').style.width=(isFinite(safeP)?safeP:0)+'%';document.getElementById('quotaReset').textContent=fmtDate(q.reset_at);document.getElementById('quotaRaw').textContent=(limit>0&&isFinite(remaining))?(fmtNum(remaining)+' / '+fmtNum(limit)):'—';document.getElementById('quotaFetched').textContent=q.fetched_at?('更新 '+fmtDate(q.fetched_at)):'—';if(btn)notify('额度已刷新','success');}catch(e){resetQuota('额度获取失败');document.getElementById('quotaFetched').textContent=e.message||String(e);if(btn)notify('额度刷新失败：'+(e.message||String(e)),'error-toast');}finally{done();}}
 async function loadSettings(){try{var s=await jsonFetch('/admin/api/settings');document.getElementById('listen').value=s.listen||'';document.getElementById('apiKey').value=s.api_key||'';document.getElementById('queueRetries').value=s.queue_retries;document.getElementById('queueMaxWait').value=s.queue_max_wait||'';document.getElementById('autoStart').checked=!!s.auto_start;}catch(e){err('settingsError',e.message||String(e));}}

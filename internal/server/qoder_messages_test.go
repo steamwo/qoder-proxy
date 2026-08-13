@@ -45,10 +45,11 @@ func TestNormalizeQoderRequestPreservesCanonicalToolRoundTrip(t *testing.T) {
 	}
 }
 
-func TestNormalizeQoderRequestConstrainsAdvertisedTools(t *testing.T) {
+func TestNormalizeQoderRequestConstrainsAdvertisedToolsForClaudeOnly(t *testing.T) {
 	req := protocol.Request{
-		System:   "base system",
-		Messages: []map[string]any{{"role": "user", "content": "inspect"}},
+		ClaudeToolCompatibility: true,
+		System:                  "base system",
+		Messages:                []map[string]any{{"role": "user", "content": "inspect"}},
 		Tools: []any{
 			map[string]any{"type": "function", "function": map[string]any{"name": "ToolSearch", "parameters": map[string]any{"type": "object"}}},
 			map[string]any{"type": "function", "function": map[string]any{"name": "Read", "parameters": map[string]any{"type": "object"}}},
@@ -68,6 +69,21 @@ func TestNormalizeQoderRequestConstrainsAdvertisedTools(t *testing.T) {
 	}
 	if strings.Contains(got.System, "Read, ToolSearch") {
 		t.Fatalf("tool names should not be duplicated into the system prompt: %s", got.System)
+	}
+}
+
+func TestNormalizeQoderRequestDoesNotAddClaudeToolConstraintForOpenAI(t *testing.T) {
+	req := protocol.Request{
+		System:   "base system",
+		Messages: []map[string]any{{"role": "user", "content": "inspect"}},
+		Tools: []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "ToolSearch", "parameters": map[string]any{"type": "object"}}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "Read", "parameters": map[string]any{"type": "object"}}},
+		},
+	}
+	got := normalizeQoderRequest(req)
+	if got.System != "base system" {
+		t.Fatalf("OpenAI system prompt changed by Claude compatibility layer: %q", got.System)
 	}
 }
 

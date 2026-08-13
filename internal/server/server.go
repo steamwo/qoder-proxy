@@ -51,26 +51,39 @@ func (b *Backend) SetModelReasoningDefaults(defaults map[string]string) {
 	b.defaultsMu.Unlock()
 }
 
+func bindClientSession(ctx context.Context, req protocol.Request) protocol.Request {
+	if key := clientSessionKeyFromContext(ctx); key != "" {
+		req.ClientSessionKey = key
+	}
+	return req
+}
+
 // Chat keeps the protocol boundary thin so one upstream client owns request behavior.
 // Chat 保持协议边界精简，由单一上游客户端统一请求行为。
 func (b *Backend) Chat(ctx context.Context, req protocol.Request) (*http.Response, error) {
-	normalized := normalizeQoderRequest(req)
+	normalized := bindClientSession(ctx, normalizeQoderRequest(req))
 	resp, err := b.Qoder.Chat(ctx, normalized)
 	if err != nil {
 		return nil, err
 	}
-	return qoder.GuardToolResponse(resp, normalized.Tools), nil
+	if normalized.ClaudeToolCompatibility {
+		return qoder.GuardToolResponse(resp, normalized.Tools), nil
+	}
+	return resp, nil
 }
 
 // ChatWithQueue preserves queue callbacks without duplicating retry policy in adapters.
 // ChatWithQueue 保留排队回调，避免各适配器重复重试策略。
 func (b *Backend) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(qoder.QueueInfo) error) (*http.Response, error) {
-	normalized := normalizeQoderRequest(req)
+	normalized := bindClientSession(ctx, normalizeQoderRequest(req))
 	resp, err := b.Qoder.ChatWithQueue(ctx, normalized, onQueue)
 	if err != nil {
 		return nil, err
 	}
-	return qoder.GuardToolResponse(resp, normalized.Tools), nil
+	if normalized.ClaudeToolCompatibility {
+		return qoder.GuardToolResponse(resp, normalized.Tools), nil
+	}
+	return resp, nil
 }
 
 // Server owns the public handler and authentication configuration.
@@ -83,7 +96,9 @@ type Server struct {
 // New creates a server without desktop-only defaults so CLI behavior stays unchanged.
 // New 创建不含桌面专属默认值的服务，确保 CLI 行为不变。
 func New(httpClient *http.Client, cred credential.Credential, apiKey string) *Server {
-	return &Server{Backend: &Backend{Registry: qoder.NewRegistry(httpClient, cred), Qoder: qoder.NewClient(httpClient, cred)}, APIKey: apiKey}
+	client := qoder.NewClient(httpClient, cred)
+	client.UsageObserver = qoder.RecordRuntimeUsage
+	return &Server{Backend: &Backend{Registry: qoder.NewRegistry(httpClient, cred), Qoder: client}, APIKey: apiKey}
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -93,7 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { openai.HandleChat(w, r, s.Backend) })
 	mux.HandleFunc("POST /v1/responses", func(w http.ResponseWriter, r *http.Request) { openai.HandleResponses(w, r, s.Backend) })
 	mux.HandleFunc("POST /v1/messages", func(w http.ResponseWriter, r *http.Request) { anthropic.HandleMessagesCompatible(w, r, s.Backend) })
-	return s.accessLog(s.cors(s.auth(mux)))
+	return s.accessLog(s.cors(s.auth(clientSession(mux))))
 }
 
 type responseRecorder struct {

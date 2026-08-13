@@ -36,10 +36,11 @@ type QueueInfo struct {
 }
 
 type Client struct {
-	HTTP       *http.Client
-	Cred       credential.Credential
-	QueueRetry QueueRetryPolicy
-	queueWait  func(context.Context, time.Duration) error
+	HTTP          *http.Client
+	Cred          credential.Credential
+	QueueRetry    QueueRetryPolicy
+	UsageObserver func(protocol.Usage)
+	queueWait     func(context.Context, time.Duration) error
 }
 
 func NewClient(httpClient *http.Client, cred credential.Credential) *Client {
@@ -64,8 +65,9 @@ func (c *Client) Chat(ctx context.Context, req protocol.Request) (*http.Response
 	return c.ChatWithQueue(ctx, req, nil)
 }
 
-// ChatWithQueue preserves one final effort value across retries so every attempt is observable and equivalent.
-// ChatWithQueue 在重试期间保持同一个最终思考等级，使每次尝试都可观测且语义一致。
+// ChatWithQueue preserves one Qoder session and one final effort value across
+// queue retries. A trustworthy client session key is reused across turns; when
+// no such key is available, the public API request gets an isolated session.
 func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(QueueInfo) error) (*http.Response, error) {
 	policy := c.QueueRetry
 	if policy.MaxRetries < 0 {
@@ -78,9 +80,13 @@ func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueu
 	if waitFn == nil {
 		waitFn = waitContext
 	}
+	sessionID, err := sessionIDForRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
-		resp, err := c.doChatAttempt(ctx, req)
+		resp, err := c.doChatAttempt(ctx, req, sessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +144,7 @@ func waitContext(ctx context.Context, d time.Duration) error {
 
 // doChatAttempt emits the final normalized effort beside both upstream request and response events.
 // doChatAttempt 在上游请求与响应事件中同时记录最终规范化后的思考等级。
-func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http.Response, error) {
+func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessionID string) (*http.Response, error) {
 	// Keep model_config byte-for-byte semantically aligned with CFlareAIProxy:
 	// when model discovery returned a config object, pass that object back to
 	// Qoder unchanged. Only synthesize the same fallback object when discovery
@@ -167,7 +173,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 	if tools == nil {
 		tools = []any{}
 	}
-	recordID := stableHash("qoder-record", req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
+	recordID := stableHash("qoder-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
 	parameters := map[string]any{"max_tokens": maxTokens}
@@ -184,7 +190,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 		"request_id":       requestID,
 		"request_set_id":   recordID,
 		"chat_record_id":   recordID,
-		"session_id":       stableHash("qoder-session", c.Cred.UserID, req.ModelID),
+		"session_id":       sessionID,
 		"stream":           true,
 		"chat_task":        "FREE_INPUT",
 		"is_reply":         true,
@@ -294,6 +300,9 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 		message := strings.TrimSpace(string(data))
 		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
 		return nil, fmt.Errorf("qoder chat returned HTTP %d: %s", resp.StatusCode, message)
+	}
+	if c.UsageObserver != nil {
+		resp.Body = observeUsageBody(resp.Body, c.UsageObserver)
 	}
 	return resp, nil
 }
