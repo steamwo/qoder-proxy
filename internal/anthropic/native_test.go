@@ -30,6 +30,9 @@ func TestMessagesCompatibleCanonicalizesToolHistoryAndWorkspace(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	if !backend.last.ClaudeToolCompatibility {
+		t.Fatal("Anthropic Messages must opt into Claude Code tool compatibility")
+	}
 
 	if !strings.Contains(backend.last.System, "Working directory: C:\\work\\repo") {
 		t.Fatalf("original workspace missing from system: %q", backend.last.System)
