@@ -17,6 +17,7 @@ func normalizeQoderRequest(req protocol.Request) protocol.Request {
 		return req
 	}
 
+	messagesBefore := len(req.Messages)
 	messages, stats := canonicalizeQoderToolHistory(req.Messages)
 	if stats.missingToolResults > 0 || stats.reorderedToolResults > 0 {
 		req.Messages = messages
@@ -25,7 +26,7 @@ func normalizeQoderRequest(req protocol.Request) protocol.Request {
 			"reordered_tool_results", stats.reorderedToolResults,
 			"tool_calls", stats.toolCalls,
 			"tool_results", stats.toolResults,
-			"messages_before", len(req.Messages),
+			"messages_before", messagesBefore,
 			"messages_after", len(messages),
 			"tail_roles", tailMessageRoles(messages, 8),
 		)
