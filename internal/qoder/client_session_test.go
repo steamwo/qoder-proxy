@@ -7,7 +7,7 @@ import (
 )
 
 func TestSessionIDForRequestReusesStableClientSession(t *testing.T) {
-	req := protocol.Request{ClientSessionKey: "claude-code/session/s1/agent/a1"}
+	req := protocol.Request{ModelID: "model-a", ClientSessionKey: "claude-code/session/s1/agent/a1"}
 	first, err := sessionIDForRequest(req)
 	if err != nil {
 		t.Fatal(err)
@@ -22,11 +22,11 @@ func TestSessionIDForRequestReusesStableClientSession(t *testing.T) {
 }
 
 func TestSessionIDForRequestSeparatesSubagents(t *testing.T) {
-	first, err := sessionIDForRequest(protocol.Request{ClientSessionKey: "claude-code/session/s1/agent/a1"})
+	first, err := sessionIDForRequest(protocol.Request{ModelID: "model-a", ClientSessionKey: "claude-code/session/s1/agent/a1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := sessionIDForRequest(protocol.Request{ClientSessionKey: "claude-code/session/s1/agent/a2"})
+	second, err := sessionIDForRequest(protocol.Request{ModelID: "model-a", ClientSessionKey: "claude-code/session/s1/agent/a2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,12 +35,26 @@ func TestSessionIDForRequestSeparatesSubagents(t *testing.T) {
 	}
 }
 
-func TestSessionIDForRequestIsolatesUnidentifiedRequests(t *testing.T) {
-	first, err := sessionIDForRequest(protocol.Request{})
+func TestSessionIDForRequestSeparatesModelsWithinClientSession(t *testing.T) {
+	first, err := sessionIDForRequest(protocol.Request{ModelID: "model-a", ClientSessionKey: "codex/thread/t1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := sessionIDForRequest(protocol.Request{})
+	second, err := sessionIDForRequest(protocol.Request{ModelID: "model-b", ClientSessionKey: "codex/thread/t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("different Qoder models shared session %q", first)
+	}
+}
+
+func TestSessionIDForRequestIsolatesUnidentifiedRequests(t *testing.T) {
+	first, err := sessionIDForRequest(protocol.Request{ModelID: "model-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionIDForRequest(protocol.Request{ModelID: "model-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
