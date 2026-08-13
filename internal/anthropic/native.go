@@ -18,10 +18,9 @@ var workingDirectoryPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)"cwd"\s*:\s*"([^"\r\n]+)"`),
 }
 
-// handleMessagesNative is the production Anthropic path. Unlike the legacy
-// normalizer, it keeps Anthropic tool_use/tool_result content blocks intact so
-// Claude Code conversation history reaches Qoder without an OpenAI tool-call
-// round trip.
+// handleMessagesNative is the production Anthropic path. It preserves the
+// Anthropic API surface for Claude Code while canonicalizing tool history to
+// OpenAI tool_calls/role=tool messages before Qoder's agent endpoint.
 func handleMessagesNative(w http.ResponseWriter, r *http.Request, backend Backend) {
 	var req MessageRequest
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMessageRequestBytes))
@@ -104,11 +103,11 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 		if role != "user" && role != "assistant" {
 			return protocol.Request{}, fmt.Errorf("messages[%d].role must be user or assistant", i)
 		}
-		converted, userText, err := convertNativeMessage(role, raw["content"])
+		converted, userText, err := convertMessage(role, raw["content"])
 		if err != nil {
 			return protocol.Request{}, fmt.Errorf("messages[%d]: %w", i, err)
 		}
-		messages = append(messages, converted)
+		messages = append(messages, converted...)
 		if userText != "" {
 			lastUser = userText
 		}
@@ -150,7 +149,7 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 		"workspace_present", workingDirectory != "",
 		"workspace_source", workspaceSource,
 		"workspace_bytes", len(workingDirectory),
-		"native_tool_history", true,
+		"openai_tool_history", true,
 	)
 
 	return protocol.Request{
