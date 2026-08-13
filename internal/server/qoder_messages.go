@@ -10,9 +10,8 @@ import (
 
 // normalizeQoderRequest keeps the adapter-produced OpenAI tool protocol intact.
 // Qoder's agent chat endpoint accepts assistant.tool_calls followed by role=tool
-// messages. This pass repairs malformed history and also makes Claude Code's
-// per-turn tool availability explicit so Qoder does not call deferred/disabled
-// tools that are not actually executable in the current client context.
+// messages. This pass repairs malformed history and also reminds Qoder that the
+// request's function schemas are the executable client tool namespace.
 func normalizeQoderRequest(req protocol.Request) protocol.Request {
 	if len(req.Messages) > 0 {
 		messagesBefore := len(req.Messages)
@@ -71,19 +70,16 @@ func appendQoderToolConstraint(system string, toolNames []string) string {
 	if len(toolNames) == 0 {
 		return system
 	}
-	constraint := "[qoder-proxy tool availability]\n" +
-		"The executable tools for this turn are exactly: " + strings.Join(toolNames, ", ") + ".\n" +
-		"Only emit tool calls whose name exactly matches one of those tools. Do not call a tool merely because it appeared in earlier context or in generic coding-agent instructions. " +
-		"If Bash or another desired tool is absent, do not call it. If ToolSearch is available, use ToolSearch to load a deferred tool before attempting that tool. Otherwise continue with the available tools."
+	constraint := "[qoder-proxy tool availability]\nOnly call tools present in the current request's tool schemas. If a desired tool is not present and ToolSearch is available, call ToolSearch first to load it. Do not invent or use Qoder-only tools."
 	if strings.TrimSpace(system) == "" {
 		return constraint
 	}
-	return strings.TrimRight(system, "\n") + "\n\n" + constraint
+	return system + "\n\n" + constraint
 }
 
-func containsString(values []string, want string) bool {
+func containsString(values []string, target string) bool {
 	for _, value := range values {
-		if value == want {
+		if value == target {
 			return true
 		}
 	}
