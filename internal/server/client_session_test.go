@@ -29,19 +29,37 @@ func TestClaudeMainSessionDoesNotInventAgent(t *testing.T) {
 	}
 }
 
-func TestCodexClientSessionUsesCurrentWindowNotParentThread(t *testing.T) {
+func TestCodexClientSessionUsesCurrentThreadBeforeParentOrRootSession(t *testing.T) {
 	r := httptest.NewRequest("POST", "/v1/responses", nil)
+	r.Header.Set("Thread-Id", "child-thread")
+	r.Header.Set("Session_id", "root-session")
 	r.Header.Set("X-Codex-Window-Id", "child-thread:0")
 	r.Header.Set("X-Codex-Parent-Thread-Id", "parent-thread")
 
 	got := clientSessionKeyFromHeaders(r)
-	want := "codex/window/child-thread:0"
+	want := "codex/thread/child-thread"
 	if got != want {
 		t.Fatalf("session key=%q want=%q", got, want)
 	}
 }
 
-func TestUnknownOpenAIClientHasNoSyntheticStableSession(t *testing.T) {
+func TestCodexSessionIDHeaderFallback(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/responses", nil)
+	r.Header.Set("Session_id", "session-123")
+	if got, want := clientSessionKeyFromHeaders(r), "codex/session/session-123"; got != want {
+		t.Fatalf("session key=%q want=%q", got, want)
+	}
+}
+
+func TestCodexTurnMetadataSessionFallback(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/responses", nil)
+	r.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"session-meta","turn_id":"turn-1"}`)
+	if got, want := clientSessionKeyFromHeaders(r), "codex/session/session-meta"; got != want {
+		t.Fatalf("session key=%q want=%q", got, want)
+	}
+}
+
+func TestUnknownOpenAIClientHasNoSyntheticStableSessionFromParent(t *testing.T) {
 	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r.Header.Set("X-Codex-Parent-Thread-Id", "parent-thread")
 	if got := clientSessionKeyFromHeaders(r); got != "" {
