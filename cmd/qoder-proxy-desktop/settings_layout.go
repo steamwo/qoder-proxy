@@ -11,11 +11,11 @@ import (
 	"gioui.org/widget/material"
 )
 
-// renderFrame keeps the existing application shell everywhere except Settings,
-// where a calmer single-surface layout replaces the uneven card grid.
-// renderFrame 保留现有应用外壳，仅在“设置”页使用更统一的单面板布局。
+// renderFrame keeps the existing application shell while routing Settings and Models
+// through their refined layouts.
+// renderFrame 保留现有应用外壳，并为“设置”和“模型”使用优化后的布局。
 func (s *appState) renderFrame(gtx layout.Context, th *material.Theme) layout.Dimensions {
-	if s.current != pageSettings {
+	if s.current != pageSettings && s.current != pageModels {
 		return s.layout(gtx, th)
 	}
 
@@ -30,6 +30,9 @@ func (s *appState) renderFrame(gtx layout.Context, th *material.Theme) layout.Di
 			}),
 			layout.Rigid(layout.Spacer{Width: 22}.Layout),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				if s.current == pageModels {
+					return s.modelsContentV2(gtx, th)
+				}
 				return s.settingsContentV2(gtx, th)
 			}),
 		)
