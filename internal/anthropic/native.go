@@ -142,7 +142,7 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 		stop = vals
 	}
 
-	slog.Debug("anthropic request normalized",
+	slog.Info("anthropic context",
 		"model", req.Model,
 		"system_bytes", len(system),
 		"messages", len(messages),
@@ -150,6 +150,7 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 		"workspace_present", workingDirectory != "",
 		"workspace_source", workspaceSource,
 		"workspace_bytes", len(workingDirectory),
+		"native_tool_history", true,
 	)
 
 	return protocol.Request{
