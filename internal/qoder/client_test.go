@@ -183,3 +183,41 @@ func TestChatSendsReasoningEffortParameter(t *testing.T) {
 		t.Fatalf("chat_context modelConfig=%#v", modelConfig)
 	}
 }
+
+func TestChatOmitsReasoningEffortWhenNormalizedAway(t *testing.T) {
+	var body map[string]any
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			Request:    r,
+		}, nil
+	})}
+	c := NewClient(hc, credential.Credential{Token: "token", UserID: "u1", MachineID: "m1"})
+	resp, err := c.Chat(context.Background(), protocol.Request{
+		PublicModel: "Plain Model", ModelID: "plain-id",
+		ModelConfig: map[string]any{"key": "plain-id", "max_output_tokens": 1024},
+		// Adapters must normalize unsupported downstream depth hints to empty.
+		ReasoningEffort: "",
+		Messages:        []map[string]any{{"role": "user", "content": "hello"}}, LastUserText: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	params, ok := body["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters=%#v", body["parameters"])
+	}
+	if _, exists := params["reasoningEffort"]; exists {
+		t.Fatalf("reasoningEffort leaked into Qoder payload: %#v", params)
+	}
+}

@@ -96,22 +96,34 @@ func ParseQuota(payload map[string]any) QuotaSnapshot {
 
 func parseQuotaWindow(label string, m map[string]any, fallbackUsed float64, fallbackReset time.Time) *QuotaWindow {
 	limit := quotaNumber(m, "total", "limit", "quota", "max")
-	remaining := quotaNumber(m, "remaining", "left", "available")
+	remaining, hasRemaining := quotaNumberPresent(m, "remaining", "left", "available")
 	used := quotaNumber(m, "percentage", "usedPercent", "used_percent")
 	remainPct := quotaNumber(m, "remainingPercentage", "remaining_percentage")
-	if used == 0 && fallbackUsed > 0 {
-		used = fallbackUsed
-	}
-	if used == 0 && remainPct > 0 {
-		used = 100 - remainPct
-	}
-	if remainPct == 0 && used > 0 {
-		remainPct = 100 - used
-	}
-	if used == 0 && remainPct == 0 && limit > 0 {
+
+	// The absolute remaining balance is the least ambiguous signal Qoder gives
+	// us. Percentage fields have changed shape/meaning across API variants, so
+	// whenever both total and remaining are explicitly present, derive both
+	// percentages from those values instead of allowing a percentage field to
+	// invert the dashboard from remaining to used quota.
+	if limit > 0 && hasRemaining {
 		remainPct = clampPercent(remaining / limit * 100)
 		used = 100 - remainPct
+	} else {
+		if used == 0 && fallbackUsed > 0 {
+			used = fallbackUsed
+		}
+		if used == 0 && remainPct > 0 {
+			used = 100 - remainPct
+		}
+		if remainPct == 0 && used > 0 {
+			remainPct = 100 - used
+		}
+		if used == 0 && remainPct == 0 && limit > 0 {
+			remainPct = clampPercent(remaining / limit * 100)
+			used = 100 - remainPct
+		}
 	}
+
 	reset := parseTimestamp(firstAny(m, "resetAt", "reset_at", "expiresAt", "expires_at"))
 	if reset.IsZero() {
 		reset = fallbackReset
@@ -135,27 +147,37 @@ func firstAny(m map[string]any, keys ...string) any {
 	return nil
 }
 func quotaNumber(m map[string]any, keys ...string) float64 {
+	v, _ := quotaNumberPresent(m, keys...)
+	return v
+}
+func quotaNumberPresent(m map[string]any, keys ...string) (float64, bool) {
 	for _, k := range keys {
-		switch v := m[k].(type) {
+		raw, exists := m[k]
+		if !exists || raw == nil {
+			continue
+		}
+		switch v := raw.(type) {
 		case float64:
-			return v
+			return v, true
 		case float32:
-			return float64(v)
+			return float64(v), true
 		case int:
-			return float64(v)
+			return float64(v), true
 		case int64:
-			return float64(v)
+			return float64(v), true
 		case json.Number:
-			f, _ := v.Float64()
-			return f
+			f, err := v.Float64()
+			if err == nil {
+				return f, true
+			}
 		case string:
 			var f float64
 			if _, err := fmt.Sscanf(strings.TrimSpace(v), "%f", &f); err == nil {
-				return f
+				return f, true
 			}
 		}
 	}
-	return 0
+	return 0, false
 }
 func clampPercent(v float64) float64 {
 	if v < 0 {

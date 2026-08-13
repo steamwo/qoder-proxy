@@ -11,14 +11,11 @@ import (
 
 const maxMessageRequestBytes = 4 << 20
 
-// HandleMessagesCompatible accepts the canonical Anthropic Messages payload and
-// also normalizes a few OpenAI-style role variants emitted by Claude-compatible
-// IDEs and gateways before delegating to the strict Anthropic adapter.
-//
-// Canonical user/assistant messages remain untouched. Inline system/developer
-// messages are folded into the top-level system prompt, while role=tool is
-// converted to Anthropic's user/tool_result representation so the existing
-// normalization path can preserve the tool call relationship.
+// HandleMessagesCompatible accepts canonical Anthropic Messages payloads and a
+// few OpenAI-style role variants emitted by Claude-compatible IDEs/gateways.
+// Canonical user/assistant content is then normalized through the Anthropic-
+// native Qoder path so tool_use/tool_result blocks are not round-tripped through
+// OpenAI tool_calls/role=tool history.
 func HandleMessagesCompatible(w http.ResponseWriter, r *http.Request, backend Backend) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxMessageRequestBytes+1))
 	if err != nil {
@@ -35,14 +32,14 @@ func HandleMessagesCompatible(w http.ResponseWriter, r *http.Request, backend Ba
 	dec.UseNumber()
 	if err := dec.Decode(&payload); err != nil {
 		restoreMessageBody(r, body)
-		HandleMessages(w, r, backend)
+		handleMessagesNative(w, r, backend)
 		return
 	}
 
 	rawMessages, ok := payload["messages"].([]any)
 	if !ok {
 		restoreMessageBody(r, body)
-		HandleMessages(w, r, backend)
+		handleMessagesNative(w, r, backend)
 		return
 	}
 
@@ -51,7 +48,7 @@ func HandleMessagesCompatible(w http.ResponseWriter, r *http.Request, backend Ba
 		text, err := textContent(existing, false)
 		if err != nil {
 			restoreMessageBody(r, body)
-			HandleMessages(w, r, backend)
+			handleMessagesNative(w, r, backend)
 			return
 		}
 		if strings.TrimSpace(text) != "" {
@@ -94,25 +91,29 @@ func HandleMessagesCompatible(w http.ResponseWriter, r *http.Request, backend Ba
 			if content == nil {
 				content = ""
 			}
+			result := map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": toolID,
+				"content":     content,
+			}
+			if isError, ok := message["is_error"].(bool); ok {
+				result["is_error"] = isError
+			}
 			normalized = append(normalized, map[string]any{
-				"role": "user",
-				"content": []any{map[string]any{
-					"type":        "tool_result",
-					"tool_use_id": toolID,
-					"content":     content,
-				}},
+				"role":    "user",
+				"content": []any{result},
 			})
 			changed = true
 		default:
-			// Preserve unknown roles so the strict adapter returns its normal
-			// Anthropic validation error instead of silently changing semantics.
+			// Preserve unknown roles so the strict native adapter returns the
+			// normal Anthropic validation error instead of changing semantics.
 			normalized = append(normalized, message)
 		}
 	}
 
 	if !changed {
 		restoreMessageBody(r, body)
-		HandleMessages(w, r, backend)
+		handleMessagesNative(w, r, backend)
 		return
 	}
 
@@ -126,7 +127,7 @@ func HandleMessagesCompatible(w http.ResponseWriter, r *http.Request, backend Ba
 		return
 	}
 	restoreMessageBody(r, encoded)
-	HandleMessages(w, r, backend)
+	handleMessagesNative(w, r, backend)
 }
 
 func restoreMessageBody(r *http.Request, body []byte) {

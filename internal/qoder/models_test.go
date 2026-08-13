@@ -61,10 +61,41 @@ func TestModelReasoningEffortCapabilities(t *testing.T) {
 	}
 }
 
-func TestModelWithoutThinkingConfigRejectsEffort(t *testing.T) {
+func TestModelWithoutThinkingConfigIgnoresDownstreamEffort(t *testing.T) {
 	model := Model{DisplayName: "Plain Model", Raw: map[string]any{"key": "plain"}}
-	if _, err := model.NormalizeReasoningEffort("high"); err == nil {
-		t.Fatal("expected configurable reasoning error")
+	for _, input := range []string{"high", "medium", "low", "none", "off"} {
+		got, err := model.NormalizeReasoningEffort(input)
+		if err != nil {
+			t.Fatalf("NormalizeReasoningEffort(%q): %v", input, err)
+		}
+		if got != "" {
+			t.Fatalf("NormalizeReasoningEffort(%q)=%q, want suppressed", input, got)
+		}
+	}
+}
+
+func TestModelWithOnlyThinkingToggleIgnoresDepthButAllowsDisable(t *testing.T) {
+	model := Model{
+		DisplayName: "Toggle Model",
+		Raw: map[string]any{"thinking_config": map[string]any{
+			"disabled": map[string]any{},
+			"enabled":  map[string]any{},
+		}},
+	}
+	for _, input := range []string{"high", "medium", "low", "minimal"} {
+		got, err := model.NormalizeReasoningEffort(input)
+		if err != nil {
+			t.Fatalf("NormalizeReasoningEffort(%q): %v", input, err)
+		}
+		if got != "" {
+			t.Fatalf("NormalizeReasoningEffort(%q)=%q, want suppressed", input, got)
+		}
+	}
+	for _, input := range []string{"none", "off"} {
+		got, err := model.NormalizeReasoningEffort(input)
+		if err != nil || got != "none" {
+			t.Fatalf("NormalizeReasoningEffort(%q)=(%q, %v), want none", input, got, err)
+		}
 	}
 }
 
@@ -87,6 +118,17 @@ func TestModelDefaultReasoningEffort(t *testing.T) {
 	}
 	if got, err := model.NormalizeReasoningEffort("auto"); err != nil || got != "" {
 		t.Fatalf("explicit auto=(%q, %v), want empty", got, err)
+	}
+}
+
+func TestPlainModelSavedReasoningDefaultIsAlsoSuppressed(t *testing.T) {
+	model := Model{
+		DisplayName:            "Plain Model",
+		DefaultReasoningEffort: "high",
+		Raw:                    map[string]any{"key": "plain"},
+	}
+	if got, err := model.NormalizeReasoningEffort(""); err != nil || got != "" {
+		t.Fatalf("plain saved default=(%q, %v), want suppressed", got, err)
 	}
 }
 

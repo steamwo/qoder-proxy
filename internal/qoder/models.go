@@ -42,7 +42,10 @@ func (m Model) SupportsReasoningDisabled() bool {
 }
 
 // NormalizeReasoningEffort applies the model default only when the request omitted a value, then validates it.
-// NormalizeReasoningEffort 仅在请求未提供值时应用模型默认值，随后按实时能力校验。
+// Models without configurable depth silently ignore downstream depth hints instead of forwarding unsupported
+// reasoningEffort parameters to Qoder. A model that explicitly supports disabling thinking may still accept none/off.
+// NormalizeReasoningEffort 仅在请求未提供值时应用模型默认值；不支持思考深度的模型会静默忽略下游深度参数，
+// 避免向 Qoder 透传不支持的 reasoningEffort。若模型明确支持关闭思考，none/off 仍可生效。
 func (m Model) NormalizeReasoningEffort(value string) (string, error) {
 	requested := strings.TrimSpace(value)
 	usingDefault := requested == ""
@@ -60,8 +63,17 @@ func (m Model) NormalizeReasoningEffort(value string) (string, error) {
 	}
 
 	efforts := m.SupportedReasoningEfforts()
+	supportsDisabled := m.SupportsReasoningDisabled()
+
+	// No live thinking controls at all: discard every downstream/default hint.
+	// This is intentionally not an error because compatibility clients may send
+	// reasoning_effort globally even when the selected model cannot consume it.
+	if len(efforts) == 0 && !supportsDisabled {
+		return "", nil
+	}
+
 	if requested == "none" {
-		if m.SupportsReasoningDisabled() {
+		if supportsDisabled {
 			return "none", nil
 		}
 		// A stale saved default must not break traffic after upstream capabilities change.
@@ -71,16 +83,17 @@ func (m Model) NormalizeReasoningEffort(value string) (string, error) {
 		}
 		return "", fmt.Errorf("model %q does not support disabling thinking", m.DisplayName)
 	}
+
+	// Some models expose only an on/off thinking control and no depth/effort
+	// choices. Ignore low/medium/high/etc. rather than leaking an unsupported
+	// reasoningEffort parameter upstream.
+	if len(efforts) == 0 {
+		return "", nil
+	}
 	for _, effort := range efforts {
 		if requested == strings.ToLower(effort) {
 			return effort, nil
 		}
-	}
-	if len(efforts) == 0 {
-		if usingDefault {
-			return "", nil
-		}
-		return "", fmt.Errorf("model %q does not support configurable reasoning effort", m.DisplayName)
 	}
 	if usingDefault {
 		return "", nil
@@ -293,7 +306,7 @@ func modelItems(v any) []map[string]any {
 				}
 				out = append(out, copy)
 			}
-		}
+	}
 	}
 	return out
 }
