@@ -89,7 +89,9 @@ type Server struct {
 // New creates a server without desktop-only defaults so CLI behavior stays unchanged.
 // New 创建不含桌面专属默认值的服务，确保 CLI 行为不变。
 func New(httpClient *http.Client, cred credential.Credential, apiKey string) *Server {
-	return &Server{Backend: &Backend{Registry: qoder.NewRegistry(httpClient, cred), Qoder: qoder.NewClient(httpClient, cred)}, APIKey: apiKey}
+	client := qoder.NewClient(httpClient, cred)
+	client.UsageObserver = qoder.RecordRuntimeUsage
+	return &Server{Backend: &Backend{Registry: qoder.NewRegistry(httpClient, cred), Qoder: client}, APIKey: apiKey}
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
