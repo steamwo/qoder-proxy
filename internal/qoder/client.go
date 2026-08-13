@@ -66,8 +66,8 @@ func (c *Client) Chat(ctx context.Context, req protocol.Request) (*http.Response
 }
 
 // ChatWithQueue preserves one Qoder session and one final effort value across
-// queue retries. A new public API request gets a new upstream session so
-// unrelated OpenAI/Anthropic conversations can never share Qoder session state.
+// queue retries. A trustworthy client session key is reused across turns; when
+// no such key is available, the public API request gets an isolated session.
 func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(QueueInfo) error) (*http.Response, error) {
 	policy := c.QueueRetry
 	if policy.MaxRetries < 0 {
@@ -80,9 +80,9 @@ func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueu
 	if waitFn == nil {
 		waitFn = waitContext
 	}
-	sessionID, err := randomUUID()
+	sessionID, err := sessionIDForRequest(req)
 	if err != nil {
-		return nil, fmt.Errorf("generate Qoder session id: %w", err)
+		return nil, err
 	}
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
