@@ -54,13 +54,23 @@ func (b *Backend) SetModelReasoningDefaults(defaults map[string]string) {
 // Chat keeps the protocol boundary thin so one upstream client owns request behavior.
 // Chat 保持协议边界精简，由单一上游客户端统一请求行为。
 func (b *Backend) Chat(ctx context.Context, req protocol.Request) (*http.Response, error) {
-	return b.Qoder.Chat(ctx, normalizeQoderRequest(req))
+	normalized := normalizeQoderRequest(req)
+	resp, err := b.Qoder.Chat(ctx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	return qoder.GuardToolResponse(resp, normalized.Tools), nil
 }
 
 // ChatWithQueue preserves queue callbacks without duplicating retry policy in adapters.
 // ChatWithQueue 保留排队回调，避免各适配器重复重试策略。
 func (b *Backend) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(qoder.QueueInfo) error) (*http.Response, error) {
-	return b.Qoder.ChatWithQueue(ctx, normalizeQoderRequest(req), onQueue)
+	normalized := normalizeQoderRequest(req)
+	resp, err := b.Qoder.ChatWithQueue(ctx, normalized, onQueue)
+	if err != nil {
+		return nil, err
+	}
+	return qoder.GuardToolResponse(resp, normalized.Tools), nil
 }
 
 // Server owns the public handler and authentication configuration.

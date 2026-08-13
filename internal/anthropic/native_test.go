@@ -9,7 +9,7 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/qoder"
 )
 
-func TestMessagesCompatiblePreservesNativeToolHistoryAndWorkspace(t *testing.T) {
+func TestMessagesCompatibleCanonicalizesToolHistoryAndWorkspace(t *testing.T) {
 	backend := &fakeBackend{
 		model: qoder.Model{UpstreamID: "native-id", DisplayName: "Native Model", Raw: map[string]any{"key": "native-id"}},
 		body:  qoderFrame(`{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`) + "data: [DONE]\n\n",
@@ -37,40 +37,72 @@ func TestMessagesCompatiblePreservesNativeToolHistoryAndWorkspace(t *testing.T) 
 	if !strings.Contains(backend.last.System, "[qoder-proxy workspace]") || !strings.Contains(backend.last.System, "active project root") {
 		t.Fatalf("workspace constraint missing from system: %q", backend.last.System)
 	}
-	if len(backend.last.Messages) != 3 {
+	if len(backend.last.Messages) != 4 {
 		t.Fatalf("messages=%#v", backend.last.Messages)
 	}
 
 	assistant := backend.last.Messages[1]
-	if assistant["role"] != "assistant" {
+	if assistant["role"] != "assistant" || assistant["content"] != "I will read it." {
 		t.Fatalf("assistant=%#v", assistant)
 	}
-	if _, exists := assistant["tool_calls"]; exists {
-		t.Fatalf("Anthropic tool history must not be converted to OpenAI tool_calls: %#v", assistant)
+	calls, ok := assistant["tool_calls"].([]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls=%#v", assistant["tool_calls"])
 	}
-	assistantBlocks, ok := assistant["content"].([]any)
-	if !ok || len(assistantBlocks) != 2 {
-		t.Fatalf("assistant content=%#v", assistant["content"])
+	call, ok := calls[0].(map[string]any)
+	if !ok || call["id"] != "call_1" || call["type"] != "function" {
+		t.Fatalf("tool call=%#v", calls[0])
 	}
-	toolUse, ok := assistantBlocks[1].(map[string]any)
-	if !ok || toolUse["type"] != "tool_use" || toolUse["id"] != "call_1" || toolUse["name"] != "Read" {
-		t.Fatalf("tool_use=%#v", assistantBlocks[1])
+	fn, ok := call["function"].(map[string]any)
+	if !ok || fn["name"] != "Read" || fn["arguments"] != `{"file_path":"C:\\work\\repo\\go.mod"}` {
+		t.Fatalf("tool function=%#v", call["function"])
 	}
 
-	user := backend.last.Messages[2]
-	if user["role"] != "user" {
-		t.Fatalf("user=%#v", user)
+	toolResult := backend.last.Messages[2]
+	if toolResult["role"] != "tool" || toolResult["tool_call_id"] != "call_1" || toolResult["content"] != "module example" {
+		t.Fatalf("tool result=%#v", toolResult)
 	}
-	userBlocks, ok := user["content"].([]any)
-	if !ok || len(userBlocks) != 2 {
-		t.Fatalf("user content=%#v", user["content"])
-	}
-	result, ok := userBlocks[0].(map[string]any)
-	if !ok || result["type"] != "tool_result" || result["tool_use_id"] != "call_1" || result["is_error"] != false {
-		t.Fatalf("tool_result=%#v", userBlocks[0])
+	user := backend.last.Messages[3]
+	if user["role"] != "user" || user["content"] != "Continue" {
+		t.Fatalf("follow-up user=%#v", user)
 	}
 	if backend.last.LastUserText != "Continue" {
 		t.Fatalf("last user text=%q", backend.last.LastUserText)
+	}
+}
+
+func TestMessagesCompatibleStreamsQoderToolCallAsAnthropicToolUse(t *testing.T) {
+	backend := &fakeBackend{
+		model: qoder.Model{UpstreamID: "stream-tool-id", DisplayName: "Stream Tool", Raw: map[string]any{"key": "stream-tool-id"}},
+		body: qoderFrame(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"/repo/README.md\"}"}}]},"finish_reason":"tool_calls"}]}`) +
+			"data: [DONE]\n\n",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"Stream Tool",
+		"max_tokens":256,
+		"stream":true,
+		"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}],
+		"messages":[{"role":"user","content":"Inspect the README"}]
+	}`))
+	rr := httptest.NewRecorder()
+	HandleMessagesCompatible(rr, req, backend)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"event: content_block_start",
+		`"type":"tool_use"`,
+		`"id":"call_1"`,
+		`"name":"Read"`,
+		"event: content_block_delta",
+		`"type":"input_json_delta"`,
+		`"stop_reason":"tool_use"`,
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in stream:\n%s", want, body)
+		}
 	}
 }
 

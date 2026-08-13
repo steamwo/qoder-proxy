@@ -37,7 +37,7 @@ func TestMessagesCompatibleFoldsSystemAndDeveloperRoles(t *testing.T) {
 	}
 }
 
-func TestMessagesCompatibleMapsOpenAIToolRoleToNativeToolResult(t *testing.T) {
+func TestMessagesCompatibleCanonicalizesOpenAIToolRoleForQoder(t *testing.T) {
 	backend := &fakeBackend{
 		model: qoder.Model{UpstreamID: "compat-tool-id", DisplayName: "Compat Tool", Raw: map[string]any{"key": "compat-tool-id"}},
 		body:  qoderFrame(`{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`) + "data: [DONE]\n\n",
@@ -56,22 +56,23 @@ func TestMessagesCompatibleMapsOpenAIToolRoleToNativeToolResult(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	foundToolResult := false
-	for _, msg := range backend.last.Messages {
-		if msg["role"] != "user" {
-			continue
-		}
-		blocks, ok := msg["content"].([]any)
-		if !ok || len(blocks) != 1 {
-			continue
-		}
-		block, ok := blocks[0].(map[string]any)
-		if ok && block["type"] == "tool_result" && block["tool_use_id"] == "call_1" && block["content"] == "result" {
-			foundToolResult = true
-		}
+	if len(backend.last.Messages) != 3 {
+		t.Fatalf("messages=%#v", backend.last.Messages)
 	}
-	if !foundToolResult {
-		t.Fatalf("tool role was not normalized to native tool_result: %#v", backend.last.Messages)
+	assistant := backend.last.Messages[0]
+	if assistant["role"] != "assistant" {
+		t.Fatalf("assistant=%#v", assistant)
+	}
+	calls, ok := assistant["tool_calls"].([]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls=%#v", assistant["tool_calls"])
+	}
+	toolResult := backend.last.Messages[1]
+	if toolResult["role"] != "tool" || toolResult["tool_call_id"] != "call_1" || toolResult["content"] != "result" {
+		t.Fatalf("tool role was not canonicalized for Qoder: %#v", backend.last.Messages)
+	}
+	if backend.last.Messages[2]["role"] != "user" || backend.last.Messages[2]["content"] != "continue" {
+		t.Fatalf("follow-up user=%#v", backend.last.Messages[2])
 	}
 }
 

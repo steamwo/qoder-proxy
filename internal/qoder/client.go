@@ -220,12 +220,18 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 	// Intentionally do not forward temperature/top_p/stop here. reasoningEffort
 	// is the only additional request parameter because Qoder's current CLI/SDK
 	// exposes it as a first-class per-request model parameter.
-	bytesBody, err := json.Marshal(body)
+	plainBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	url := BaseURL + ChatPath
-	headers, err := BuildHeaders(bytesBody, url, c.Cred)
+	// Qoder's agent endpoint supports an encoded request mode used by Qoder CLI
+	// implementations such as 9Router and CLIProxyAPIPlus. Tool schemas can
+	// contain shell/code/security-like strings that trigger the upstream WAF;
+	// encode the complete body and sign the encoded bytes so tools reach the
+	// agent endpoint intact.
+	encodedBody := qoderEncodeBody(plainBody)
+	url := BaseURL + ChatEncodedPath
+	headers, err := BuildHeaders(encodedBody, url, c.Cred)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +245,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 		source = "system"
 	}
 	headers.Set("X-Model-Source", source)
-	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bytesBody))
+	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encodedBody))
 	httpReq.Header = headers
 	// net/http otherwise injects User-Agent: Go-http-client/1.1. CFlareAIProxy's
 	// Worker fetch does not explicitly send a Qoder client user-agent, so suppress
@@ -251,7 +257,9 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request) (*http
 		"model", req.PublicModel,
 		"upstream_model", req.ModelID,
 		"url", url,
-		"body_bytes", len(bytesBody),
+		"body_bytes", len(plainBody),
+		"encoded_body_bytes", len(encodedBody),
+		"encoded", true,
 		"messages", len(req.Messages),
 		"roles", messageRoles(req.Messages),
 		"last_user_bytes", len(req.LastUserText),
