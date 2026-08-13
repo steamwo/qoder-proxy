@@ -62,39 +62,56 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 	if err != nil {
 		return protocol.Request{}, err
 	}
-	var rawMessages []map[string]any
-	var systemParts []string
+
 	var inputString string
-	var discoveredTools []map[string]any
+	var items []map[string]any
 	if len(req.Input) == 0 || string(req.Input) == "null" {
 		return protocol.Request{}, fmt.Errorf("input is required")
 	}
-	if err := json.Unmarshal(req.Input, &inputString); err == nil {
-		rawMessages = append(rawMessages, map[string]any{"role": "user", "content": inputString})
-	} else {
-		var items []map[string]any
+	if err := json.Unmarshal(req.Input, &inputString); err != nil {
 		if err := json.Unmarshal(req.Input, &items); err != nil {
 			return protocol.Request{}, fmt.Errorf("unsupported responses input: %w", err)
 		}
+	}
+
+	var discoveredTools []map[string]any
+	for _, item := range items {
+		switch asString(item["type"]) {
+		case "tool_search_output", "additional_tools":
+			discoveredTools = append(discoveredTools, mapsFromAny(item["tools"])...)
+		}
+	}
+	allTools := make([]map[string]any, 0, len(req.Tools)+len(discoveredTools))
+	allTools = append(allTools, req.Tools...)
+	allTools = append(allTools, discoveredTools...)
+	tools, routes := normalizeResponsesTools(allTools)
+
+	var rawMessages []map[string]any
+	var systemParts []string
+	if inputString != "" || (len(items) == 0 && len(req.Input) > 0 && string(req.Input) == `""`) {
+		rawMessages = append(rawMessages, map[string]any{"role": "user", "content": inputString})
+	} else {
 		for _, item := range items {
 			typeName := asString(item["type"])
 			role := asString(item["role"])
 			switch typeName {
 			case "function_call":
-				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), asString(item["name"]), item["arguments"]))
+				name := asString(item["name"])
+				namespace := asString(item["namespace"])
+				qoderName := responseToolAlias(routes, "function", namespace, name)
+				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), qoderName, item["arguments"]))
 				continue
 			case "function_call_output":
 				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": valueText(item["output"])})
 				continue
 			case "tool_search_call":
-				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), "tool_search", item["arguments"]))
+				qoderName := responseToolAlias(routes, "tool_search", "", "tool_search")
+				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), qoderName, item["arguments"]))
 				continue
 			case "tool_search_output":
-				discoveredTools = append(discoveredTools, mapsFromAny(item["tools"])...)
 				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": valueText(item["tools"])})
 				continue
 			case "additional_tools":
-				discoveredTools = append(discoveredTools, mapsFromAny(item["tools"])...)
 				continue
 			}
 			if role == "" && typeName == "message" {
@@ -106,6 +123,7 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 			rawMessages = append(rawMessages, map[string]any{"role": role, "content": item["content"]})
 		}
 	}
+
 	if len(req.Instructions) > 0 && string(req.Instructions) != "null" {
 		var s string
 		if json.Unmarshal(req.Instructions, &s) == nil && s != "" {
@@ -123,11 +141,6 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 		system = strings.Join(append(systemParts, system), "\n\n")
 		system = strings.TrimSpace(system)
 	}
-
-	allTools := make([]map[string]any, 0, len(req.Tools)+len(discoveredTools))
-	allTools = append(allTools, req.Tools...)
-	allTools = append(allTools, discoveredTools...)
-	tools, routes := normalizeResponsesTools(allTools)
 
 	return protocol.Request{
 		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw, ReasoningEffort: reasoningEffort, System: system, Messages: messages, Tools: tools, ToolRoutes: routes,
@@ -180,12 +193,7 @@ func normalizeResponsesTools(input []map[string]any) ([]any, map[string]protocol
 	return out, routes
 }
 
-func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedAliases, seenTargets map[string]string, tool map[string]any, namespace, namespaceDescription string) {
-	// This signature is kept below through a small adapter because seenTargets is
-	// a set. The compiler catches accidental misuse when the helper evolves.
-}
-
-func appendResponsesToolImpl(out *[]any, routes map[string]protocol.ToolRoute, usedAliases map[string]string, seenTargets map[string]bool, tool map[string]any, namespace, namespaceDescription string) {
+func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedAliases map[string]string, seenTargets map[string]bool, tool map[string]any, namespace, namespaceDescription string) {
 	typ := asString(tool["type"])
 	switch typ {
 	case "namespace":
@@ -195,7 +203,7 @@ func appendResponsesToolImpl(out *[]any, routes map[string]protocol.ToolRoute, u
 		}
 		desc := strings.TrimSpace(asString(tool["description"]))
 		for _, child := range mapsFromAny(tool["tools"]) {
-			appendResponsesToolImpl(out, routes, usedAliases, seenTargets, child, ns, desc)
+			appendResponsesTool(out, routes, usedAliases, seenTargets, child, ns, desc)
 		}
 	case "tool_search":
 		key := "tool_search\x00client"
@@ -251,6 +259,18 @@ func appendResponsesToolImpl(out *[]any, routes map[string]protocol.ToolRoute, u
 		*out = append(*out, map[string]any{"type": "function", "function": fn})
 		routes[alias] = protocol.ToolRoute{Kind: "function", Name: name, Namespace: namespace}
 	}
+}
+
+func responseToolAlias(routes map[string]protocol.ToolRoute, kind, namespace, name string) string {
+	for alias, route := range routes {
+		if route.Kind == kind && route.Namespace == namespace && route.Name == name {
+			return alias
+		}
+	}
+	if namespace != "" {
+		return sanitizeToolAlias(namespace + "__" + name)
+	}
+	return name
 }
 
 func reserveToolAlias(base, target string, used map[string]string) string {
