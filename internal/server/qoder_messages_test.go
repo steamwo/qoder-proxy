@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steamwo/qoder-proxy/internal/protocol"
@@ -41,6 +42,29 @@ func TestNormalizeQoderRequestPreservesCanonicalToolRoundTrip(t *testing.T) {
 	}
 	if got.Messages[3]["role"] != "user" || got.Messages[3]["content"] != "continue" {
 		t.Fatalf("following user=%#v", got.Messages[3])
+	}
+}
+
+func TestNormalizeQoderRequestConstrainsAdvertisedTools(t *testing.T) {
+	req := protocol.Request{
+		System:   "base system",
+		Messages: []map[string]any{{"role": "user", "content": "inspect"}},
+		Tools: []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "ToolSearch", "parameters": map[string]any{"type": "object"}}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "Read", "parameters": map[string]any{"type": "object"}}},
+		},
+	}
+	got := normalizeQoderRequest(req)
+	for _, want := range []string{
+		"base system",
+		"[qoder-proxy tool availability]",
+		"The executable tools for this turn are exactly: Read, ToolSearch.",
+		"If Bash or another desired tool is absent, do not call it.",
+		"use ToolSearch to load a deferred tool",
+	} {
+		if !strings.Contains(got.System, want) {
+			t.Fatalf("system missing %q: %s", want, got.System)
+		}
 	}
 }
 
