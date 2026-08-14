@@ -50,6 +50,93 @@ func (s *streamOutputState) filter(ev protocol.Event) (protocol.Event, bool) {
 	}
 }
 
+// normalizeOpenAIChunk performs the same snapshot reconciliation before a Qoder
+// inner chunk is exposed through the OpenAI streaming API, then converts a
+// full-message choice to delta form.
+func (s *streamOutputState) normalizeOpenAIChunk(obj map[string]any) bool {
+	choices, ok := obj["choices"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, rawChoice := range choices {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
+			continue
+		}
+		if delta, ok := choice["delta"].(map[string]any); ok {
+			if text := contentText(delta["content"]); text != "" {
+				s.text += text
+			}
+			s.recordToolPayload(delta, false)
+			continue
+		}
+		if message, ok := choice["message"].(map[string]any); ok {
+			if text := contentText(message["content"]); text != "" {
+				suffix := unseenSnapshotSuffix(s.text, text)
+				if suffix != text {
+					message["content"] = suffix
+					changed = true
+				}
+				if suffix != "" {
+					s.text += suffix
+				}
+			}
+			if s.recordToolPayload(message, true) {
+				changed = true
+			}
+			continue
+		}
+		if text := contentText(choice["text"]); text != "" {
+			suffix := unseenSnapshotSuffix(s.text, text)
+			if suffix != text {
+				choice["text"] = suffix
+				changed = true
+			}
+			if suffix != "" {
+				s.text += suffix
+			}
+		}
+	}
+	if normalizeStreamingChoices(obj) {
+		changed = true
+	}
+	return changed
+}
+
+func (s *streamOutputState) recordToolPayload(payload map[string]any, snapshot bool) bool {
+	calls, ok := payload["tool_calls"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, rawCall := range calls {
+		call, ok := rawCall.(map[string]any)
+		if !ok {
+			continue
+		}
+		idx := numberAsInt(call["index"])
+		fn, _ := call["function"].(map[string]any)
+		args := stringValue(fn["arguments"])
+		if args == "" {
+			continue
+		}
+		if snapshot {
+			suffix := unseenSnapshotSuffix(s.toolArgs[idx], args)
+			if suffix != args {
+				fn["arguments"] = suffix
+				changed = true
+			}
+			if suffix != "" {
+				s.toolArgs[idx] += suffix
+			}
+			continue
+		}
+		s.toolArgs[idx] += args
+	}
+	return changed
+}
+
 func unseenSnapshotSuffix(emitted, snapshot string) string {
 	if snapshot == "" {
 		return ""
