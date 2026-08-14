@@ -140,18 +140,11 @@ func readSSE(r io.Reader, onData func(string) error) error {
 	}
 
 	// Qoder normally emits standards-compliant SSE frames separated by an empty
-	// line, which is what CFlareAIProxy's sseTransform expects. In practice its
-	// HTTP edge can also deliver a complete one-line `data: {...}` event followed
-	// by only a single newline. Waiting for another blank line in that case stalls
-	// the proxy until the client cancels the request. If a data line already holds
-	// a complete JSON value (or [DONE]), dispatch it immediately. Multi-line SSE
-	// data remains buffered and is flushed by the normal blank-line delimiter.
+	// line. Its HTTP edge can also emit one complete data line followed by only a
+	// single newline, so dispatch complete JSON values immediately.
 	isCompleteData := func(value string) bool {
 		trimmed := strings.TrimSpace(value)
-		if trimmed == "[DONE]" {
-			return true
-		}
-		return json.Valid([]byte(trimmed))
+		return trimmed == "[DONE]" || json.Valid([]byte(trimmed))
 	}
 
 	for scanner.Scan() {
@@ -211,26 +204,39 @@ func parseInner(raw []byte, emit func(protocol.Event) error) (bool, error) {
 			if !ok {
 				continue
 			}
-			delta, _ := choice["delta"].(map[string]any)
-			if text := contentText(delta["content"]); text != "" {
-				if err := emit(protocol.Event{Kind: protocol.EventTextDelta, Text: text, Raw: append([]byte(nil), raw...)}); err != nil {
-					return true, err
-				}
-			}
-			if calls, ok := delta["tool_calls"].([]any); ok {
-				for _, rawCall := range calls {
-					call, ok := rawCall.(map[string]any)
-					if !ok {
-						continue
+
+			payload, _ := choicePayload(choice)
+			if payload != nil {
+				if text := contentText(payload["content"]); text != "" {
+					if err := emit(protocol.Event{Kind: protocol.EventTextDelta, Text: text, Raw: append([]byte(nil), raw...)}); err != nil {
+						return true, err
 					}
-					idx := numberAsInt(call["index"])
-					fn, _ := call["function"].(map[string]any)
-					if err := emit(protocol.Event{Kind: protocol.EventToolDelta, ToolIndex: idx,
-						ToolID: stringValue(call["id"]), ToolName: stringValue(fn["name"]), ToolArguments: stringValue(fn["arguments"]), Raw: append([]byte(nil), raw...)}); err != nil {
+				}
+				if calls, ok := payload["tool_calls"].([]any); ok {
+					for _, rawCall := range calls {
+						call, ok := rawCall.(map[string]any)
+						if !ok {
+							continue
+						}
+						idx := numberAsInt(call["index"])
+						fn, _ := call["function"].(map[string]any)
+						if err := emit(protocol.Event{Kind: protocol.EventToolDelta, ToolIndex: idx,
+							ToolID: stringValue(call["id"]), ToolName: stringValue(fn["name"]), ToolArguments: stringValue(fn["arguments"]), Raw: append([]byte(nil), raw...)}); err != nil {
+							return true, err
+						}
+					}
+				}
+			} else if _, deltaExists := choice["delta"]; !deltaExists {
+				// Some non-stream-shaped Qoder frames use choices[].text instead of
+				// either delta.content or message.content. Only use this fallback when
+				// delta is absent so a final aggregate snapshot cannot be duplicated.
+				if text := contentText(choice["text"]); text != "" {
+					if err := emit(protocol.Event{Kind: protocol.EventTextDelta, Text: text, Raw: append([]byte(nil), raw...)}); err != nil {
 						return true, err
 					}
 				}
 			}
+
 			if reason := stringValue(choice["finish_reason"]); reason != "" {
 				if err := emit(protocol.Event{Kind: protocol.EventFinish, FinishReason: reason, Raw: append([]byte(nil), raw...)}); err != nil {
 					return true, err
@@ -239,6 +245,7 @@ func parseInner(raw []byte, emit func(protocol.Event) error) (bool, error) {
 		}
 		return true, nil
 	}
+
 	// Be tolerant if Qoder ever starts returning Responses-style inner events.
 	if typ := stringValue(obj["type"]); typ != "" {
 		switch typ {
@@ -358,6 +365,7 @@ func contentText(v any) string {
 	}
 	return b.String()
 }
+
 func firstNumber(m map[string]any, keys ...string) int {
 	for _, k := range keys {
 		if n := numberAsInt(m[k]); n != 0 {
@@ -366,6 +374,7 @@ func firstNumber(m map[string]any, keys ...string) int {
 	}
 	return 0
 }
+
 func numberAsInt(v any) int {
 	switch n := v.(type) {
 	case float64:
@@ -378,7 +387,9 @@ func numberAsInt(v any) int {
 	}
 	return 0
 }
+
 func stringValue(v any) string { s, _ := v.(string); return s }
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -440,9 +451,13 @@ func logEnvelopeShape(envelope map[string]any, inner string, hasBody bool) {
 						if reason := stringValue(choice["finish_reason"]); reason != "" {
 							attrs = append(attrs, "finish_reason", reason)
 						}
-						if delta, ok := choice["delta"].(map[string]any); ok {
-							attrs = append(attrs, "delta_keys", mapKeys(delta))
-							if content, exists := delta["content"]; exists {
+						if payload, incremental := choicePayload(choice); payload != nil {
+							kind := "message"
+							if incremental {
+								kind = "delta"
+							}
+							attrs = append(attrs, "choice_payload", kind, "payload_keys", mapKeys(payload))
+							if content, exists := payload["content"]; exists {
 								attrs = append(attrs, "content_type", fmt.Sprintf("%T", content), "content_bytes", len(contentText(content)))
 							}
 						}
@@ -493,9 +508,6 @@ func RelayChatStream(r io.Reader, publicModel string, writeData func(string) err
 			if err := writeData(string(b)); err != nil {
 				return err
 			}
-			// The upstream may keep the HTTP/2 stream open after delivering a business
-			// rejection envelope. Stop consuming immediately so clients do not hang
-			// until their own timeout expires.
 			return upstreamErr
 		}
 		if !hasBody || strings.TrimSpace(inner) == "" {
