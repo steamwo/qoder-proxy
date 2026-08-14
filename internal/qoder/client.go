@@ -173,7 +173,8 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	if tools == nil {
 		tools = []any{}
 	}
-	recordID := stableHash("qoder-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
+	requestSetID := requestSetIDForRequest(req, sessionID)
+	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
 	parameters := map[string]any{"max_tokens": maxTokens}
@@ -188,8 +189,8 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	}
 	body := map[string]any{
 		"request_id":       requestID,
-		"request_set_id":   recordID,
-		"chat_record_id":   recordID,
+		"request_set_id":   requestSetID,
+		"chat_record_id":   chatRecordID,
 		"session_id":       sessionID,
 		"stream":           true,
 		"chat_task":        "FREE_INPUT",
@@ -262,6 +263,8 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"operation", "chat",
 		"model", req.PublicModel,
 		"upstream_model", req.ModelID,
+		"request_set_id", requestSetID,
+		"chat_record_id", chatRecordID,
 		"url", url,
 		"body_bytes", len(plainBody),
 		"encoded_body_bytes", len(encodedBody),
@@ -280,13 +283,15 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	)
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
-		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, err
 	}
 	slog.Info("qoder response",
 		"operation", "chat",
 		"model", req.PublicModel,
 		"upstream_model", req.ModelID,
+		"request_set_id", requestSetID,
+		"chat_record_id", chatRecordID,
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
 		"status", resp.StatusCode,
 		"duration_ms", time.Since(started).Milliseconds(),
@@ -298,7 +303,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		message := strings.TrimSpace(string(data))
-		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
+		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
 		return nil, fmt.Errorf("qoder chat returned HTTP %d: %s", resp.StatusCode, message)
 	}
 	if c.UsageObserver != nil {
