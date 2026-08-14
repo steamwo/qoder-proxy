@@ -15,6 +15,7 @@ func choicePayload(choice map[string]any) (payload map[string]any, incremental b
 		}
 	}
 	if message, ok := choice["message"].(map[string]any); ok {
+		ensureToolCallIndexes(message)
 		return message, false
 	}
 	return nil, false
@@ -28,6 +29,22 @@ func toolCallIndex(call map[string]any, position int) int {
 		return numberAsInt(raw)
 	}
 	return position
+}
+
+func ensureToolCallIndexes(payload map[string]any) {
+	calls, ok := payload["tool_calls"].([]any)
+	if !ok {
+		return
+	}
+	for position, rawCall := range calls {
+		call, ok := rawCall.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := call["index"]; !exists {
+			call["index"] = position
+		}
+	}
 }
 
 // normalizeStreamingChoices converts non-stream-shaped Qoder choices into the
@@ -49,17 +66,7 @@ func normalizeStreamingChoices(obj map[string]any) bool {
 			continue
 		}
 		if message, ok := choice["message"].(map[string]any); ok {
-			if calls, ok := message["tool_calls"].([]any); ok {
-				for position, rawCall := range calls {
-					call, ok := rawCall.(map[string]any)
-					if !ok {
-						continue
-					}
-					if _, exists := call["index"]; !exists {
-						call["index"] = position
-					}
-				}
-			}
+			ensureToolCallIndexes(message)
 			choice["delta"] = message
 			delete(choice, "message")
 			changed = true
