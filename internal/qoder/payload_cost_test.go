@@ -133,3 +133,16 @@ func TestPayloadCostTrackerFlagsExactReplayWithoutAdvancingTurn(t *testing.T) {
 		t.Fatalf("wire total=%d want=216", replay.CumulativeEncodedWireBytes)
 	}
 }
+
+func TestMeasureQoderPayloadCostIgnoresUnrelatedPayloads(t *testing.T) {
+	cases := [][]byte{
+		[]byte("not-json"),
+		[]byte(`{"foo":"bar"}`),
+		[]byte(`{"session_id":"session-only","messages":[]}`),
+	}
+	for _, plain := range cases {
+		if _, _, ok := measureQoderPayloadCost(plain, []byte("encoded")); ok {
+			t.Fatalf("unrelated payload was recognized: %s", plain)
+		}
+	}
+}
