@@ -24,10 +24,11 @@ type Backend struct {
 	Qoder                  *qoder.Client
 	defaultsMu             sync.RWMutex
 	modelReasoningDefaults map[string]string
+	modelContextDefaults   map[string]int
 }
 
-// ResolveModel attaches the stable-ID default after live discovery so stale values are revalidated downstream.
-// ResolveModel 在实时发现后附加稳定 ID 默认值，使过期值仍会在下游重新校验。
+// ResolveModel attaches the stable-ID reasoning default after live discovery so stale values are revalidated downstream.
+// ResolveModel 在实时发现后附加稳定 ID 默认思考值，使过期值仍会在下游重新校验。
 func (b *Backend) ResolveModel(ctx context.Context, name string) (qoder.Model, error) {
 	model, err := b.Registry.Resolve(ctx, name)
 	if err != nil {
@@ -51,6 +52,29 @@ func (b *Backend) SetModelReasoningDefaults(defaults map[string]string) {
 	b.defaultsMu.Unlock()
 }
 
+// SetModelContextDefaults replaces the saved per-model context-window snapshot.
+func (b *Backend) SetModelContextDefaults(defaults map[string]int) {
+	cloned := make(map[string]int, len(defaults))
+	for modelID, tokens := range defaults {
+		cloned[modelID] = tokens
+	}
+	b.defaultsMu.Lock()
+	b.modelContextDefaults = cloned
+	b.defaultsMu.Unlock()
+}
+
+func (b *Backend) applyContextDefault(req protocol.Request) (protocol.Request, error) {
+	b.defaultsMu.RLock()
+	savedDefault := b.modelContextDefaults[req.ModelID]
+	b.defaultsMu.RUnlock()
+	contextWindow, err := qoder.ResolveContextWindow(req.ModelConfig, req.ContextWindow, savedDefault)
+	if err != nil {
+		return protocol.Request{}, err
+	}
+	req.ContextWindow = contextWindow
+	return req, nil
+}
+
 func bindClientSession(ctx context.Context, req protocol.Request) protocol.Request {
 	if key := clientSessionKeyFromContext(ctx); key != "" {
 		req.ClientSessionKey = key
@@ -62,6 +86,11 @@ func bindClientSession(ctx context.Context, req protocol.Request) protocol.Reque
 // Chat 保持协议边界精简，由单一上游客户端统一请求行为。
 func (b *Backend) Chat(ctx context.Context, req protocol.Request) (*http.Response, error) {
 	normalized := bindClientSession(ctx, normalizeQoderRequest(req))
+	var err error
+	normalized, err = b.applyContextDefault(normalized)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := b.Qoder.Chat(ctx, normalized)
 	if err != nil {
 		return nil, err
@@ -76,6 +105,11 @@ func (b *Backend) Chat(ctx context.Context, req protocol.Request) (*http.Respons
 // ChatWithQueue 保留排队回调，避免各适配器重复重试策略。
 func (b *Backend) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(qoder.QueueInfo) error) (*http.Response, error) {
 	normalized := bindClientSession(ctx, normalizeQoderRequest(req))
+	var err error
+	normalized, err = b.applyContextDefault(normalized)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := b.Qoder.ChatWithQueue(ctx, normalized, onQueue)
 	if err != nil {
 		return nil, err
