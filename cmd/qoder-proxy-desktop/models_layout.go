@@ -48,8 +48,8 @@ func (s *appState) modelsContentV2(gtx layout.Context, th *material.Theme) layou
 	)
 }
 
-// modelsPageV2 keeps model capabilities and the actionable reasoning default in the same list.
-// modelsPageV2 将模型能力与可操作的默认思考等级放在同一列表中。
+// modelsPageV2 keeps live model capabilities and actionable defaults in the same list.
+// modelsPageV2 将模型实时能力与可操作的默认参数放在同一列表中。
 func (s *appState) modelsPageV2(gtx layout.Context, th *material.Theme) layout.Dimensions {
 	s.mu.RLock()
 	models, errText := append([]qoder.Model(nil), s.models...), s.modelsErr
@@ -105,7 +105,7 @@ func (s *appState) modelTableV2(gtx layout.Context, th *material.Theme, models [
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Top: 10}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return bodyLabel(gtx, th, "上下文与输出列显示 Qoder 实时能力上限；默认思考可直接在列表中修改。", ui.faint, 11)
+					return bodyLabel(gtx, th, "上下文列显示 Qoder 实时最大档位，并可在支持时设置默认窗口；输出与思考能力同样来自实时模型配置。", ui.faint, 11)
 				})
 			}),
 		)
@@ -134,7 +134,7 @@ func (s *appState) modelRowV2(gtx layout.Context, th *material.Theme, model qode
 								return bodyLabel(gtx, th, model.DisplayName, ui.text, 13)
 							}),
 							layout.Flexed(.55, func(gtx layout.Context) layout.Dimensions {
-								return bodyLabel(gtx, th, humanTokens(model.MaxInputTokens), ui.muted, 12)
+								return s.inlineContextSelector(gtx, th, model)
 							}),
 							layout.Flexed(.55, func(gtx layout.Context) layout.Dimensions {
 								return bodyLabel(gtx, th, humanTokens(model.MaxOutputTokens), ui.muted, 12)
@@ -144,6 +144,18 @@ func (s *appState) modelRowV2(gtx layout.Context, th *material.Theme, model qode
 							}),
 						)
 					}),
+				}
+				if inlineContextMenu.openID == model.UpstreamID {
+					children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Top: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+								if max := gtx.Dp(280); gtx.Constraints.Max.X > max {
+									gtx.Constraints.Max.X = max
+								}
+								return s.inlineContextOptions(gtx, th, model)
+							})
+						})
+					}))
 				}
 				if inlineReasoningMenu.openID == model.UpstreamID {
 					children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -172,6 +184,7 @@ func (s *appState) inlineReasoningSelector(gtx layout.Context, th *material.Them
 	selected := s.modelReasoningDefault(model)
 	trigger := inlineClickable(inlineReasoningMenu.triggers, model.UpstreamID)
 	if trigger.Clicked(gtx) {
+		inlineContextMenu.openID = ""
 		if inlineReasoningMenu.openID == model.UpstreamID {
 			inlineReasoningMenu.openID = ""
 		} else {

@@ -19,9 +19,12 @@ type Request struct {
 	// Empty means use the model/account default. Supported values are validated
 	// against the selected model's thinking_config before reaching the client.
 	ReasoningEffort string
-	System          string
-	Messages        []map[string]any
-	Tools           []any
+	// ContextWindow is the effective per-request Qoder context window in tokens.
+	// Zero means use Qoder's automatic/default behavior.
+	ContextWindow int
+	System        string
+	Messages      []map[string]any
+	Tools         []any
 	// ToolRoutes maps Qoder-visible function names back to downstream protocol
 	// tool identities. It lets the Responses adapter flatten namespace/tool_search
 	// tools for Qoder without losing the client-visible tool kind or namespace.

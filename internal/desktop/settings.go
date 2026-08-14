@@ -19,12 +19,17 @@ type Settings struct {
 	MinimizeToTray         bool              `json:"minimize_to_tray"`
 	TrayNotifications      bool              `json:"tray_notifications"`
 	ModelReasoningDefaults map[string]string `json:"model_reasoning_defaults,omitempty"`
+	ModelContextDefaults   map[string]int    `json:"model_context_defaults,omitempty"`
 }
 
 // DefaultSettings initializes maps eagerly so first-run model choices can be saved safely.
 // DefaultSettings 预先初始化映射，确保首次运行即可安全保存模型选项。
 func DefaultSettings() Settings {
-	return Settings{Listen: "127.0.0.1:9000", QueueRetries: 20, QueueMaxWait: "10m", AutoStart: true, MinimizeToTray: true, TrayNotifications: true, ModelReasoningDefaults: map[string]string{}}
+	return Settings{
+		Listen: "127.0.0.1:9000", QueueRetries: 20, QueueMaxWait: "10m", AutoStart: true,
+		MinimizeToTray: true, TrayNotifications: true,
+		ModelReasoningDefaults: map[string]string{}, ModelContextDefaults: map[string]int{},
+	}
 }
 
 // SettingsPath exposes the resolved file location so users can inspect their local data.
@@ -59,10 +64,13 @@ func LoadSettings() Settings {
 	if _, e := time.ParseDuration(s.QueueMaxWait); e != nil {
 		s.QueueMaxWait = "10m"
 	}
-	// Older configuration files omit the map; normalize them before the UI mutates it.
-	// 旧配置文件没有此映射；在界面修改前先将其规范化。
+	// Older configuration files omit these maps; normalize them before the UI mutates them.
+	// 旧配置文件没有这些映射；在界面修改前先将其规范化。
 	if s.ModelReasoningDefaults == nil {
 		s.ModelReasoningDefaults = map[string]string{}
+	}
+	if s.ModelContextDefaults == nil {
+		s.ModelContextDefaults = map[string]int{}
 	}
 	return s
 }
@@ -76,6 +84,18 @@ func SaveSettings(s Settings) error {
 	}
 	if s.Listen == "" {
 		return errors.New("listen address is empty")
+	}
+	// The Gio settings form predates context defaults and rebuilds Settings from
+	// its visible fields. Preserve the existing map when that caller leaves it nil.
+	if s.ModelContextDefaults == nil {
+		var existing struct {
+			ModelContextDefaults map[string]int `json:"model_context_defaults,omitempty"`
+		}
+		if b, err := os.ReadFile(p); err == nil && json.Unmarshal(b, &existing) == nil && existing.ModelContextDefaults != nil {
+			s.ModelContextDefaults = existing.ModelContextDefaults
+		} else {
+			s.ModelContextDefaults = map[string]int{}
+		}
 	}
 	if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
 		return e

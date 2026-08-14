@@ -77,6 +77,20 @@ func TestRequestSetIDSeparatesRepeatedPromptInSameSession(t *testing.T) {
 	}
 }
 
+func TestRequestSetIDChangesWithExplicitContextWindow(t *testing.T) {
+	sessionID := "session-1"
+	base := protocol.Request{
+		ModelID:  "model-id",
+		Messages: []map[string]any{{"role": "user", "content": "inspect the repository"}},
+	}
+	explicit := base
+	explicit.ContextWindow = 1000000
+
+	if requestSetIDForRequest(base, sessionID) == requestSetIDForRequest(explicit, sessionID) {
+		t.Fatal("different context-window policies reused request_set_id")
+	}
+}
+
 func TestRequestSetPrefixIgnoresEmptySyntheticUserMessage(t *testing.T) {
 	messages := []map[string]any{
 		{"role": "user", "content": "task"},

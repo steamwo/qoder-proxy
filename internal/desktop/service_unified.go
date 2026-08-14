@@ -310,6 +310,7 @@ func (s *unifiedService) enableProxy() error {
 	settings := LoadSettings()
 	app := server.New(http.DefaultClient, cred, settings.APIKey)
 	app.Backend.SetModelReasoningDefaults(settings.ModelReasoningDefaults)
+	app.Backend.SetModelContextDefaults(settings.ModelContextDefaults)
 	maxWait, _ := time.ParseDuration(settings.QueueMaxWait)
 	if maxWait <= 0 {
 		maxWait = 10 * time.Minute
@@ -431,9 +432,14 @@ func (s *unifiedService) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		unifiedWriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	case r.URL.Path == "/admin/api/models" && r.Method == http.MethodGet:
 		s.handleUnifiedModels(w, r)
+	case r.URL.Path == "/admin/api/model-contexts" && r.Method == http.MethodGet:
+		s.handleUnifiedModelContexts(w, r)
 	case r.URL.Path == "/admin/api/models/default" && r.Method == http.MethodPost:
 		if !unifiedAllowMutation(w, r) { return }
 		s.handleUnifiedModelDefault(w, r)
+	case r.URL.Path == "/admin/api/models/context-default" && r.Method == http.MethodPost:
+		if !unifiedAllowMutation(w, r) { return }
+		s.handleUnifiedModelContextDefault(w, r)
 	default:
 		http.NotFound(w, r)
 	}
