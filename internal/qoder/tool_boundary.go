@@ -141,65 +141,67 @@ func (s *toolBoundaryState) rewriteInner(raw []byte) ([]byte, bool, error) {
 		if !ok {
 			continue
 		}
-		delta, _ := choice["delta"].(map[string]any)
-		if calls, ok := delta["tool_calls"].([]any); ok {
-			kept := make([]any, 0, len(calls))
-			for _, rawCall := range calls {
-				call, ok := rawCall.(map[string]any)
-				if !ok {
-					kept = append(kept, rawCall)
-					continue
-				}
-				idx := numberAsInt(call["index"])
-				if _, redirected := s.redirected[idx]; redirected {
-					// The first fragment was replaced with a complete ToolSearch input;
-					// discard later argument fragments from the original Qoder tool.
-					changed = true
-					continue
-				}
-				if _, blocked := s.blocked[idx]; blocked {
-					changed = true
-					continue
-				}
+		payload, _ := choicePayload(choice)
+		if payload != nil {
+			if calls, ok := payload["tool_calls"].([]any); ok {
+				kept := make([]any, 0, len(calls))
+				for _, rawCall := range calls {
+					call, ok := rawCall.(map[string]any)
+					if !ok {
+						kept = append(kept, rawCall)
+						continue
+					}
+					idx := numberAsInt(call["index"])
+					if _, redirected := s.redirected[idx]; redirected {
+						// The first fragment was replaced with a complete ToolSearch input;
+						// discard later argument fragments from the original Qoder tool.
+						changed = true
+						continue
+					}
+					if _, blocked := s.blocked[idx]; blocked {
+						changed = true
+						continue
+					}
 
-				fn, _ := call["function"].(map[string]any)
-				name := strings.TrimSpace(stringValue(fn["name"]))
-				if name == "" {
-					// Continuation fragment for a previously accepted tool call.
-					kept = append(kept, call)
-					continue
-				}
-				if _, advertised := s.allowed[name]; advertised {
-					s.forwardedTool = true
-					kept = append(kept, call)
-					continue
-				}
+					fn, _ := call["function"].(map[string]any)
+					name := strings.TrimSpace(stringValue(fn["name"]))
+					if name == "" {
+						// Continuation fragment for a previously accepted tool call.
+						kept = append(kept, call)
+						continue
+					}
+					if _, advertised := s.allowed[name]; advertised {
+						s.forwardedTool = true
+						kept = append(kept, call)
+						continue
+					}
 
-				changed = true
-				if s.hasToolSearch {
-					s.redirected[idx] = name
-					fn["name"] = "ToolSearch"
-					query, _ := json.Marshal(map[string]any{"query": "select:" + name})
-					fn["arguments"] = string(query)
-					s.forwardedTool = true
-					kept = append(kept, call)
-					slog.Warn("qoder tool bridged to client ToolSearch",
+					changed = true
+					if s.hasToolSearch {
+						s.redirected[idx] = name
+						fn["name"] = "ToolSearch"
+						query, _ := json.Marshal(map[string]any{"query": "select:" + name})
+						fn["arguments"] = string(query)
+						s.forwardedTool = true
+						kept = append(kept, call)
+						slog.Warn("qoder tool bridged to client ToolSearch",
+							"qoder_tool", name,
+							"advertised_tools", len(s.allowed),
+						)
+						continue
+					}
+
+					s.blocked[idx] = name
+					slog.Warn("qoder tool blocked by client namespace",
 						"qoder_tool", name,
 						"advertised_tools", len(s.allowed),
 					)
-					continue
 				}
-
-				s.blocked[idx] = name
-				slog.Warn("qoder tool blocked by client namespace",
-					"qoder_tool", name,
-					"advertised_tools", len(s.allowed),
-				)
-			}
-			if len(kept) == 0 {
-				delete(delta, "tool_calls")
-			} else {
-				delta["tool_calls"] = kept
+				if len(kept) == 0 {
+					delete(payload, "tool_calls")
+				} else {
+					payload["tool_calls"] = kept
+				}
 			}
 		}
 
