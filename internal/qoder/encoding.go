@@ -36,5 +36,6 @@ func qoderEncodeBody(plaintext []byte) []byte {
 			out[i] = c
 		}
 	}
+	observeQoderPayloadCost(plaintext, out)
 	return out
 }
