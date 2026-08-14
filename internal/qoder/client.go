@@ -86,7 +86,7 @@ func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueu
 	}
 	started := time.Now()
 	for attempt := 0; ; attempt++ {
-		resp, err := c.doChatAttempt(ctx, req, sessionID)
+		resp, err := c.doChatAttempt(ctx, req, sessionID, attempt)
 		if err != nil {
 			return nil, err
 		}
@@ -142,13 +142,10 @@ func waitContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// doChatAttempt emits the final normalized effort beside both upstream request and response events.
-// doChatAttempt 在上游请求与响应事件中同时记录最终规范化后的思考等级。
-func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessionID string) (*http.Response, error) {
-	// Keep model_config byte-for-byte semantically aligned with CFlareAIProxy:
-	// when model discovery returned a config object, pass that object back to
-	// Qoder unchanged. Only synthesize the same fallback object when discovery
-	// did not provide one.
+// doChatAttempt emits the final normalized effort and task identity beside both
+// upstream request and response events. attempt is zero-based; attempts after
+// the first are explicitly marked is_retry for Qoder.
+func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessionID string, attempt int) (*http.Response, error) {
 	modelConfig := cloneMap(req.ModelConfig)
 	if len(modelConfig) == 0 {
 		modelConfig = map[string]any{
@@ -177,6 +174,8 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
+	isRetry := attempt > 0
+	clientSessionBound := strings.TrimSpace(req.ClientSessionKey) != ""
 	parameters := map[string]any{"max_tokens": maxTokens}
 	if req.ReasoningEffort != "" {
 		parameters["reasoningEffort"] = req.ReasoningEffort
@@ -195,7 +194,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"stream":           true,
 		"chat_task":        "FREE_INPUT",
 		"is_reply":         true,
-		"is_retry":         false,
+		"is_retry":         isRetry,
 		"source":           1,
 		"version":          "3",
 		"session_type":     "qodercli",
@@ -263,6 +262,10 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"operation", "chat",
 		"model", req.PublicModel,
 		"upstream_model", req.ModelID,
+		"attempt", attempt+1,
+		"is_retry", isRetry,
+		"client_session_bound", clientSessionBound,
+		"session_id", sessionID,
 		"request_set_id", requestSetID,
 		"chat_record_id", chatRecordID,
 		"url", url,
@@ -283,13 +286,17 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	)
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
-		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "attempt", attempt+1, "is_retry", isRetry, "client_session_bound", clientSessionBound, "session_id", sessionID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, err
 	}
 	slog.Info("qoder response",
 		"operation", "chat",
 		"model", req.PublicModel,
 		"upstream_model", req.ModelID,
+		"attempt", attempt+1,
+		"is_retry", isRetry,
+		"client_session_bound", clientSessionBound,
+		"session_id", sessionID,
 		"request_set_id", requestSetID,
 		"chat_record_id", chatRecordID,
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
@@ -303,7 +310,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		message := strings.TrimSpace(string(data))
-		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
+		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "attempt", attempt+1, "is_retry", isRetry, "client_session_bound", clientSessionBound, "session_id", sessionID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
 		return nil, fmt.Errorf("qoder chat returned HTTP %d: %s", resp.StatusCode, message)
 	}
 	if c.UsageObserver != nil {
