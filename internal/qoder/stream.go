@@ -469,9 +469,10 @@ func logEnvelopeShape(envelope map[string]any, inner string, hasBody bool) {
 	slog.Debug("qoder first envelope shape", attrs...)
 }
 
-// RelayChatStream mirrors CFlareAIProxy's qoderChatStream behavior: parse only
-// the outer Qoder SSE envelope and forward envelope.body as an OpenAI chat SSE
-// data payload. This deliberately avoids interpreting/re-encoding chat deltas.
+// RelayChatStream mirrors CFlareAIProxy's qoderChatStream behavior: parse the
+// outer Qoder SSE envelope and forward envelope.body as OpenAI chat SSE data.
+// Full-message choices are normalized to delta form because Qoder occasionally
+// mixes non-stream and stream-shaped chunks on the same SSE connection.
 func RelayChatStream(r io.Reader, publicModel string, writeData func(string) error) error {
 	doneSent := false
 	envelopes := 0
@@ -522,14 +523,17 @@ func RelayChatStream(r io.Reader, publicModel string, writeData func(string) err
 		}
 		innerFrames++
 
-		// Preserve the Qoder-provided OpenAI chat chunk exactly, except that the
-		// public API model identifier must remain display_name rather than the
-		// hidden upstream model id.
 		forward := inner
 		var chunk map[string]any
-		if publicModel != "" && json.Unmarshal([]byte(inner), &chunk) == nil {
-			if _, exists := chunk["model"]; exists {
-				chunk["model"] = publicModel
+		if json.Unmarshal([]byte(inner), &chunk) == nil {
+			changed := normalizeStreamingChoices(chunk)
+			if publicModel != "" {
+				if _, exists := chunk["model"]; exists {
+					chunk["model"] = publicModel
+					changed = true
+				}
+			}
+			if changed {
 				if b, err := json.Marshal(chunk); err == nil {
 					forward = string(b)
 				}
