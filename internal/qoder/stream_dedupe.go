@@ -72,6 +72,7 @@ func (s *streamOutputState) normalizeOpenAIChunk(obj map[string]any) bool {
 			continue
 		}
 		if message, ok := choice["message"].(map[string]any); ok {
+			ensureToolCallIndexes(message)
 			if text := contentText(message["content"]); text != "" {
 				suffix := unseenSnapshotSuffix(s.text, text)
 				if suffix != text {
@@ -110,12 +111,12 @@ func (s *streamOutputState) recordToolPayload(payload map[string]any, snapshot b
 		return false
 	}
 	changed := false
-	for _, rawCall := range calls {
+	for position, rawCall := range calls {
 		call, ok := rawCall.(map[string]any)
 		if !ok {
 			continue
 		}
-		idx := numberAsInt(call["index"])
+		idx := toolCallIndex(call, position)
 		fn, _ := call["function"].(map[string]any)
 		args := stringValue(fn["arguments"])
 		if args == "" {
