@@ -130,11 +130,71 @@ func (s *toolBoundaryState) rewriteInner(raw []byte) ([]byte, bool, error) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return raw, false, nil
 	}
-	choices, ok := obj["choices"].([]any)
-	if !ok {
-		return raw, false, nil
+
+	changed := false
+	if choices, ok := obj["choices"].([]any); ok {
+		if s.rewriteChoices(choices) {
+			changed = true
+		}
 	}
 
+	// Qoder has used several wrapper shapes around llm_model_result over time.
+	// Apply the same tool namespace boundary recursively so a nested full-message
+	// tool call cannot bypass the Claude Code advertised-tool contract.
+	for _, key := range []string{"llm_model_result", "data", "result", "payload", "body"} {
+		value, exists := obj[key]
+		if !exists || value == nil {
+			continue
+		}
+		var nestedRaw []byte
+		wasString := false
+		switch nested := value.(type) {
+		case string:
+			if strings.TrimSpace(nested) == "" || !json.Valid([]byte(nested)) {
+				continue
+			}
+			wasString = true
+			nestedRaw = []byte(nested)
+		case map[string]any, []any:
+			encoded, err := json.Marshal(nested)
+			if err != nil {
+				continue
+			}
+			nestedRaw = encoded
+		default:
+			continue
+		}
+
+		rewritten, nestedChanged, err := s.rewriteInner(nestedRaw)
+		if err != nil {
+			return raw, changed, err
+		}
+		if !nestedChanged {
+			continue
+		}
+		changed = true
+		if wasString {
+			obj[key] = string(rewritten)
+			continue
+		}
+		var decoded any
+		if err := json.Unmarshal(rewritten, &decoded); err != nil {
+			return raw, changed, err
+		}
+		obj[key] = decoded
+	}
+
+	if !changed {
+		return raw, false, nil
+	}
+	encoded, err := json.Marshal(obj)
+	if err != nil {
+		return raw, false, err
+	}
+	return encoded, true, nil
+}
+
+func (s *toolBoundaryState) rewriteChoices(choices []any) bool {
 	changed := false
 	for _, rawChoice := range choices {
 		choice, ok := rawChoice.(map[string]any)
@@ -210,15 +270,7 @@ func (s *toolBoundaryState) rewriteInner(raw []byte) ([]byte, bool, error) {
 			changed = true
 		}
 	}
-
-	if !changed {
-		return raw, false, nil
-	}
-	encoded, err := json.Marshal(obj)
-	if err != nil {
-		return raw, false, err
-	}
-	return encoded, true, nil
+	return changed
 }
 
 func advertisedFunctionTools(tools []any) map[string]struct{} {
