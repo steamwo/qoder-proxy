@@ -2,6 +2,15 @@ package protocol
 
 import "encoding/json"
 
+type ToolRoute struct {
+	// Kind is the downstream Responses API tool kind represented by the
+	// OpenAI-function-shaped tool sent to Qoder. Currently "function" and
+	// "tool_search" are used.
+	Kind      string
+	Name      string
+	Namespace string
+}
+
 type Request struct {
 	PublicModel string
 	ModelID     string
@@ -13,11 +22,15 @@ type Request struct {
 	System          string
 	Messages        []map[string]any
 	Tools           []any
-	MaxTokens       int
-	Temperature     *float64
-	TopP            *float64
-	Stop            any
-	LastUserText    string
+	// ToolRoutes maps Qoder-visible function names back to downstream protocol
+	// tool identities. It lets the Responses adapter flatten namespace/tool_search
+	// tools for Qoder without losing the client-visible tool kind or namespace.
+	ToolRoutes       map[string]ToolRoute
+	MaxTokens        int
+	Temperature      *float64
+	TopP             *float64
+	Stop             any
+	LastUserText     string
 	// ClientSessionKey identifies the current client-side conversation or agent.
 	// It is never forwarded verbatim; Qoder derives a stable opaque session ID
 	// from it. Empty means no trustworthy client session identifier was supplied.

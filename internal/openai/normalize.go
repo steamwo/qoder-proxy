@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -61,30 +62,56 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 	if err != nil {
 		return protocol.Request{}, err
 	}
-	var rawMessages []map[string]any
-	var systemParts []string
+
 	var inputString string
+	var items []map[string]any
 	if len(req.Input) == 0 || string(req.Input) == "null" {
 		return protocol.Request{}, fmt.Errorf("input is required")
 	}
-	if err := json.Unmarshal(req.Input, &inputString); err == nil {
-		rawMessages = append(rawMessages, map[string]any{"role": "user", "content": inputString})
-	} else {
-		var items []map[string]any
+	if err := json.Unmarshal(req.Input, &inputString); err != nil {
 		if err := json.Unmarshal(req.Input, &items); err != nil {
 			return protocol.Request{}, fmt.Errorf("unsupported responses input: %w", err)
 		}
+	}
+
+	var discoveredTools []map[string]any
+	for _, item := range items {
+		switch asString(item["type"]) {
+		case "tool_search_output", "additional_tools":
+			discoveredTools = append(discoveredTools, mapsFromAny(item["tools"])...)
+		}
+	}
+	allTools := make([]map[string]any, 0, len(req.Tools)+len(discoveredTools))
+	allTools = append(allTools, req.Tools...)
+	allTools = append(allTools, discoveredTools...)
+	tools, routes := normalizeResponsesTools(allTools)
+
+	var rawMessages []map[string]any
+	var systemParts []string
+	if inputString != "" || (len(items) == 0 && len(req.Input) > 0 && string(req.Input) == `""`) {
+		rawMessages = append(rawMessages, map[string]any{"role": "user", "content": inputString})
+	} else {
 		for _, item := range items {
 			typeName := asString(item["type"])
 			role := asString(item["role"])
-			if typeName == "function_call" {
-				rawMessages = append(rawMessages, map[string]any{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{
-					"id": firstString(item, "call_id", "id"), "type": "function", "function": map[string]any{"name": asString(item["name"]), "arguments": asString(item["arguments"])},
-				}}})
+			switch typeName {
+			case "function_call":
+				name := asString(item["name"])
+				namespace := asString(item["namespace"])
+				qoderName := responseToolAlias(routes, "function", namespace, name)
+				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), qoderName, item["arguments"]))
 				continue
-			}
-			if typeName == "function_call_output" {
+			case "function_call_output":
 				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": valueText(item["output"])})
+				continue
+			case "tool_search_call":
+				qoderName := responseToolAlias(routes, "tool_search", "", "tool_search")
+				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), qoderName, item["arguments"]))
+				continue
+			case "tool_search_output":
+				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": valueText(item["tools"])})
+				continue
+			case "additional_tools":
 				continue
 			}
 			if role == "" && typeName == "message" {
@@ -96,6 +123,7 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 			rawMessages = append(rawMessages, map[string]any{"role": role, "content": item["content"]})
 		}
 	}
+
 	if len(req.Instructions) > 0 && string(req.Instructions) != "null" {
 		var s string
 		if json.Unmarshal(req.Instructions, &s) == nil && s != "" {
@@ -113,21 +141,202 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 		system = strings.Join(append(systemParts, system), "\n\n")
 		system = strings.TrimSpace(system)
 	}
-	tools := make([]any, 0, len(req.Tools))
-	for _, tool := range req.Tools {
-		if asString(tool["type"]) != "function" {
+
+	return protocol.Request{
+		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw, ReasoningEffort: reasoningEffort, System: system, Messages: messages, Tools: tools, ToolRoutes: routes,
+		MaxTokens: req.MaxOutputTokens, Temperature: req.Temperature, TopP: req.TopP, LastUserText: lastUser,
+	}, nil
+}
+
+func canonicalToolCallMessage(callID, name string, arguments any) map[string]any {
+	if callID == "" {
+		callID = "call_unknown"
+	}
+	return map[string]any{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{
+		"id": callID, "type": "function", "function": map[string]any{"name": name, "arguments": argumentsText(arguments)},
+	}}}
+}
+
+func argumentsText(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if v == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+func normalizeResponsesTools(input []map[string]any) ([]any, map[string]protocol.ToolRoute) {
+	out := make([]any, 0, len(input))
+	routes := make(map[string]protocol.ToolRoute)
+	usedAliases := make(map[string]string)
+	seenTargets := make(map[string]bool)
+
+	// Reserve tool_search first so a client function coincidentally named
+	// tool_search cannot steal the discoverability entry point used by Codex.
+	for _, tool := range input {
+		if asString(tool["type"]) == "tool_search" {
+			appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "")
+		}
+	}
+	for _, tool := range input {
+		if asString(tool["type"]) == "tool_search" {
 			continue
 		}
-		fn := map[string]any{"name": asString(tool["name"]), "description": asString(tool["description"]), "parameters": tool["parameters"]}
+		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "")
+	}
+	return out, routes
+}
+
+func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedAliases map[string]string, seenTargets map[string]bool, tool map[string]any, namespace, namespaceDescription string) {
+	typ := asString(tool["type"])
+	switch typ {
+	case "namespace":
+		ns := strings.TrimSpace(asString(tool["name"]))
+		if ns == "" {
+			return
+		}
+		desc := strings.TrimSpace(asString(tool["description"]))
+		for _, child := range mapsFromAny(tool["tools"]) {
+			appendResponsesTool(out, routes, usedAliases, seenTargets, child, ns, desc)
+		}
+	case "tool_search":
+		key := "tool_search\x00client"
+		if seenTargets[key] {
+			return
+		}
+		seenTargets[key] = true
+		alias := reserveToolAlias("tool_search", key, usedAliases)
+		params := tool["parameters"]
+		if params == nil {
+			params = map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "required": []any{"query"}, "additionalProperties": false}
+		}
+		fn := map[string]any{"name": alias, "parameters": params}
+		if desc := strings.TrimSpace(asString(tool["description"])); desc != "" {
+			fn["description"] = desc
+		}
+		*out = append(*out, map[string]any{"type": "function", "function": fn})
+		routes[alias] = protocol.ToolRoute{Kind: "tool_search", Name: "tool_search"}
+	case "function":
+		name := strings.TrimSpace(asString(tool["name"]))
+		if name == "" {
+			return
+		}
+		key := "function\x00" + namespace + "\x00" + name
+		if seenTargets[key] {
+			return
+		}
+		seenTargets[key] = true
+		base := name
+		if namespace != "" {
+			base = namespace + "__" + name
+		}
+		alias := reserveToolAlias(base, key, usedAliases)
+		params := tool["parameters"]
+		if params == nil {
+			params = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		fn := map[string]any{"name": alias, "parameters": params}
+		desc := strings.TrimSpace(asString(tool["description"]))
+		if namespaceDescription != "" {
+			if desc == "" {
+				desc = namespaceDescription
+			} else {
+				desc = namespaceDescription + "\n\n" + desc
+			}
+		}
+		if desc != "" {
+			fn["description"] = desc
+		}
 		if strict, ok := tool["strict"].(bool); ok {
 			fn["strict"] = strict
 		}
-		tools = append(tools, map[string]any{"type": "function", "function": fn})
+		*out = append(*out, map[string]any{"type": "function", "function": fn})
+		routes[alias] = protocol.ToolRoute{Kind: "function", Name: name, Namespace: namespace}
 	}
-	return protocol.Request{
-		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw, ReasoningEffort: reasoningEffort, System: system, Messages: messages, Tools: tools,
-		MaxTokens: req.MaxOutputTokens, Temperature: req.Temperature, TopP: req.TopP, LastUserText: lastUser,
-	}, nil
+}
+
+func responseToolAlias(routes map[string]protocol.ToolRoute, kind, namespace, name string) string {
+	for alias, route := range routes {
+		if route.Kind == kind && route.Namespace == namespace && route.Name == name {
+			return alias
+		}
+	}
+	if namespace != "" {
+		return sanitizeToolAlias(namespace + "__" + name)
+	}
+	return name
+}
+
+func reserveToolAlias(base, target string, used map[string]string) string {
+	base = sanitizeToolAlias(base)
+	if base == "" {
+		base = "tool"
+	}
+	if len(base) > 64 {
+		base = shortenToolAlias(base, target)
+	}
+	if previous, exists := used[base]; !exists || previous == target {
+		used[base] = target
+		return base
+	}
+	sum := sha256.Sum256([]byte(target))
+	suffix := fmt.Sprintf("__%x", sum[:5])
+	maxPrefix := 64 - len(suffix)
+	if maxPrefix < 1 {
+		maxPrefix = 1
+	}
+	if len(base) > maxPrefix {
+		base = base[:maxPrefix]
+	}
+	alias := base + suffix
+	used[alias] = target
+	return alias
+}
+
+func shortenToolAlias(base, target string) string {
+	sum := sha256.Sum256([]byte(target))
+	suffix := fmt.Sprintf("__%x", sum[:5])
+	maxPrefix := 64 - len(suffix)
+	if len(base) > maxPrefix {
+		base = base[:maxPrefix]
+	}
+	return base + suffix
+}
+
+func sanitizeToolAlias(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return strings.Trim(b.String(), "_")
+}
+
+func mapsFromAny(v any) []map[string]any {
+	switch items := v.(type) {
+	case []map[string]any:
+		return items
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, raw := range items {
+			if m, ok := raw.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func normalizeMessages(input []map[string]any) ([]map[string]any, string, string) {
