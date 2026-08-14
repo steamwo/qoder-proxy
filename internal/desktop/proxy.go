@@ -51,6 +51,7 @@ func (p *ProxyManager) Start(cred credential.Credential, s Settings) error {
 	}
 	app := server.New(http.DefaultClient, cred, s.APIKey)
 	app.Backend.SetModelReasoningDefaults(s.ModelReasoningDefaults)
+	app.Backend.SetModelContextDefaults(s.ModelContextDefaults)
 	maxWait, _ := time.ParseDuration(s.QueueMaxWait)
 	if maxWait <= 0 {
 		maxWait = 10 * time.Minute
@@ -84,6 +85,16 @@ func (p *ProxyManager) UpdateModelReasoningDefaults(defaults map[string]string) 
 	p.mu.RUnlock()
 	if backend != nil {
 		backend.SetModelReasoningDefaults(defaults)
+	}
+}
+
+// UpdateModelContextDefaults applies saved context windows without interrupting active connections.
+func (p *ProxyManager) UpdateModelContextDefaults(defaults map[string]int) {
+	p.mu.RLock()
+	backend := p.backend
+	p.mu.RUnlock()
+	if backend != nil {
+		backend.SetModelContextDefaults(defaults)
 	}
 }
 
