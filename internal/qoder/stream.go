@@ -368,6 +368,7 @@ func contentText(v any) string {
 				b.WriteString(s)
 			}
 		}
+	}
 	return b.String()
 }
 
