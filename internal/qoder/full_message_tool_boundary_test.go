@@ -37,3 +37,23 @@ func TestGuardToolResponseBridgesUnknownFullMessageToolToToolSearch(t *testing.T
 		t.Fatalf("original Qoder arguments leaked after bridge: %q", toolArgs)
 	}
 }
+
+func TestGuardToolResponseBridgesUnknownNestedFullMessageTool(t *testing.T) {
+	inner := `{"llm_model_result":{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_bash","type":"function","function":{"name":"Bash","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}}`
+	resp := toolBoundaryResponse(qoderBoundaryFrame(inner))
+	GuardToolResponse(resp, []any{functionTool("Read"), functionTool("ToolSearch")})
+
+	var toolName, toolArgs string
+	if err := ParseStream(resp.Body, func(ev protocol.Event) error {
+		if ev.Kind == protocol.EventToolDelta {
+			toolName = ev.ToolName
+			toolArgs += ev.ToolArguments
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if toolName != "ToolSearch" || toolArgs != `{"query":"select:Bash"}` {
+		t.Fatalf("nested tool=%q args=%q", toolName, toolArgs)
+	}
+}
