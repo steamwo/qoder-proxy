@@ -82,3 +82,29 @@ func TestParseStreamAcceptsFullMessageToolCalls(t *testing.T) {
 		t.Fatalf("finish=%q", finish)
 	}
 }
+
+func TestRelayChatStreamNormalizesFullMessageChoiceToDelta(t *testing.T) {
+	stream := outer(`{"id":"chatcmpl-upstream","model":"hidden","choices":[{"message":{"role":"assistant","content":"prefix"},"finish_reason":null}]}`) +
+		outer(`{"id":"chatcmpl-upstream","model":"hidden","choices":[{"delta":{"content":" suffix"},"finish_reason":"stop"}]}`) +
+		"data: [DONE]\n\n"
+
+	var got []string
+	if err := RelayChatStream(strings.NewReader(stream), "Public Model", func(data string) error {
+		got = append(got, data)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("frames=%d %#v", len(got), got)
+	}
+	if !strings.Contains(got[0], `"delta":{"content":"prefix","role":"assistant"}`) {
+		t.Fatalf("full message was not normalized to delta: %s", got[0])
+	}
+	if strings.Contains(got[0], `"message"`) {
+		t.Fatalf("non-stream message leaked into streaming chunk: %s", got[0])
+	}
+	if !strings.Contains(got[0], `"model":"Public Model"`) {
+		t.Fatalf("public model not preserved: %s", got[0])
+	}
+}
