@@ -20,6 +20,16 @@ func choicePayload(choice map[string]any) (payload map[string]any, incremental b
 	return nil, false
 }
 
+// toolCallIndex uses the explicit streaming index when present. Complete
+// message.tool_calls arrays normally omit that field, so their array position
+// becomes the stable index used by downstream assemblers and boundary state.
+func toolCallIndex(call map[string]any, position int) int {
+	if raw, exists := call["index"]; exists && raw != nil {
+		return numberAsInt(raw)
+	}
+	return position
+}
+
 // normalizeStreamingChoices converts non-stream-shaped Qoder choices into the
 // delta form expected by OpenAI streaming clients. Existing delta choices are
 // never touched, even when Qoder also mirrors a full message snapshot beside
@@ -39,6 +49,17 @@ func normalizeStreamingChoices(obj map[string]any) bool {
 			continue
 		}
 		if message, ok := choice["message"].(map[string]any); ok {
+			if calls, ok := message["tool_calls"].([]any); ok {
+				for position, rawCall := range calls {
+					call, ok := rawCall.(map[string]any)
+					if !ok {
+						continue
+					}
+					if _, exists := call["index"]; !exists {
+						call["index"] = position
+					}
+				}
+			}
 			choice["delta"] = message
 			delete(choice, "message")
 			changed = true
