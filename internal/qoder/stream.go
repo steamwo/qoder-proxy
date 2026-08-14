@@ -17,6 +17,7 @@ import (
 
 func ParseStream(r io.Reader, emit func(protocol.Event) error) error {
 	stats := streamStats{}
+	output := newStreamOutputState()
 	err := readSSE(r, func(data string) error {
 		stats.Envelopes++
 		if data == "[DONE]" {
@@ -40,6 +41,11 @@ func ParseStream(r io.Reader, emit func(protocol.Event) error) error {
 		}
 		stats.InnerFrames++
 		recognized, err := parseInner([]byte(inner), func(ev protocol.Event) error {
+			filtered, keep := output.filter(ev)
+			if !keep {
+				return nil
+			}
+			ev = filtered
 			stats.Events++
 			switch ev.Kind {
 			case protocol.EventTextDelta:
@@ -362,7 +368,6 @@ func contentText(v any) string {
 				b.WriteString(s)
 			}
 		}
-	}
 	return b.String()
 }
 
@@ -479,6 +484,7 @@ func RelayChatStream(r io.Reader, publicModel string, writeData func(string) err
 	innerFrames := 0
 	emptyBodies := 0
 	firstEnvelopeLogged := false
+	output := newStreamOutputState()
 	err := readSSE(r, func(data string) error {
 		envelopes++
 		if data == "[DONE]" {
@@ -526,7 +532,7 @@ func RelayChatStream(r io.Reader, publicModel string, writeData func(string) err
 		forward := inner
 		var chunk map[string]any
 		if json.Unmarshal([]byte(inner), &chunk) == nil {
-			changed := normalizeStreamingChoices(chunk)
+			changed := output.normalizeOpenAIChunk(chunk)
 			if publicModel != "" {
 				if _, exists := chunk["model"]; exists {
 					chunk["model"] = publicModel
