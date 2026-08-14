@@ -1,6 +1,7 @@
 package qoder
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -58,6 +59,45 @@ func TestParseStreamDoesNotDuplicateMessageSnapshotWhenDeltaExists(t *testing.T)
 	}
 }
 
+func TestParseStreamDoesNotDuplicateFinalCrossFrameSnapshot(t *testing.T) {
+	stream := outer(`{"choices":[{"delta":{"content":"prefix "},"finish_reason":null}]}`) +
+		outer(`{"choices":[{"delta":{"content":"suffix"},"finish_reason":null}]}`) +
+		outer(`{"choices":[{"message":{"role":"assistant","content":"prefix suffix"},"finish_reason":"stop"}]}`) +
+		"data: [DONE]\n\n"
+
+	var text strings.Builder
+	if err := ParseStream(strings.NewReader(stream), func(ev protocol.Event) error {
+		if ev.Kind == protocol.EventTextDelta {
+			text.WriteString(ev.Text)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text.String() != "prefix suffix" {
+		t.Fatalf("cross-frame snapshot duplicated output: %q", text.String())
+	}
+}
+
+func TestParseStreamSnapshotCanAddOnlyMissingSuffix(t *testing.T) {
+	stream := outer(`{"choices":[{"delta":{"content":"prefix "},"finish_reason":null}]}`) +
+		outer(`{"choices":[{"message":{"role":"assistant","content":"prefix suffix"},"finish_reason":"stop"}]}`) +
+		"data: [DONE]\n\n"
+
+	var text strings.Builder
+	if err := ParseStream(strings.NewReader(stream), func(ev protocol.Event) error {
+		if ev.Kind == protocol.EventTextDelta {
+			text.WriteString(ev.Text)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text.String() != "prefix suffix" {
+		t.Fatalf("missing snapshot suffix: %q", text.String())
+	}
+}
+
 func TestParseStreamAcceptsFullMessageToolCalls(t *testing.T) {
 	stream := outer(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"README.md\"}"}}]},"finish_reason":"tool_calls"}]}`) +
 		"data: [DONE]\n\n"
@@ -106,5 +146,35 @@ func TestRelayChatStreamNormalizesFullMessageChoiceToDelta(t *testing.T) {
 	}
 	if !strings.Contains(got[0], `"model":"Public Model"`) {
 		t.Fatalf("public model not preserved: %s", got[0])
+	}
+}
+
+func TestRelayChatStreamDoesNotReplayFinalFullMessageSnapshot(t *testing.T) {
+	stream := outer(`{"id":"chatcmpl-upstream","choices":[{"delta":{"content":"prefix "},"finish_reason":null}]}`) +
+		outer(`{"id":"chatcmpl-upstream","choices":[{"delta":{"content":"suffix"},"finish_reason":null}]}`) +
+		outer(`{"id":"chatcmpl-upstream","choices":[{"message":{"role":"assistant","content":"prefix suffix"},"finish_reason":"stop"}]}`) +
+		"data: [DONE]\n\n"
+
+	var text strings.Builder
+	if err := RelayChatStream(strings.NewReader(stream), "Public Model", func(data string) error {
+		if data == "[DONE]" {
+			return nil
+		}
+		var chunk map[string]any
+		if json.Unmarshal([]byte(data), &chunk) != nil {
+			return nil
+		}
+		choices, _ := chunk["choices"].([]any)
+		for _, rawChoice := range choices {
+			choice, _ := rawChoice.(map[string]any)
+			delta, _ := choice["delta"].(map[string]any)
+			text.WriteString(contentText(delta["content"]))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text.String() != "prefix suffix" {
+		t.Fatalf("relay replayed snapshot: %q", text.String())
 	}
 }
