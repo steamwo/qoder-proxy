@@ -106,6 +106,7 @@ func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueu
 			"model", req.PublicModel,
 			"upstream_model", req.ModelID,
 			"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
+			"context_window", effectiveContextWindowLabel(req.ContextWindow),
 			"attempt", attempt+1,
 			"queue_type", info.QueueType,
 			"queue_count", info.QueueCount,
@@ -142,8 +143,7 @@ func waitContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// doChatAttempt emits the final normalized effort beside both upstream request and response events.
-// doChatAttempt 在上游请求与响应事件中同时记录最终规范化后的思考等级。
+// doChatAttempt emits the final normalized effort/context values beside both upstream request and response events.
 func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessionID string) (*http.Response, error) {
 	// Keep model_config byte-for-byte semantically aligned with CFlareAIProxy:
 	// when model discovery returned a config object, pass that object back to
@@ -173,12 +173,15 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	if tools == nil {
 		tools = []any{}
 	}
-	recordID := stableHash("qoder-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort)
+	recordID := stableHash("qoder-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
 	parameters := map[string]any{"max_tokens": maxTokens}
 	if req.ReasoningEffort != "" {
 		parameters["reasoningEffort"] = req.ReasoningEffort
+	}
+	if req.ContextWindow > 0 {
+		parameters["contextWindow"] = req.ContextWindow
 	}
 	isReasoning := boolField(modelConfig, "is_reasoning")
 	if req.ReasoningEffort == "none" {
@@ -224,8 +227,8 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		},
 	}
 	// Intentionally do not forward temperature/top_p/stop here. reasoningEffort
-	// is the only additional request parameter because Qoder's current CLI/SDK
-	// exposes it as a first-class per-request model parameter.
+	// and contextWindow are the only additional request parameters because Qoder's
+	// current CLI/SDK exposes both as first-class per-request model parameters.
 	plainBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -272,15 +275,17 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"tools", len(tools),
 		"max_tokens", maxTokens,
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
+		"context_window", effectiveContextWindowLabel(req.ContextWindow),
 		"supported_reasoning_efforts", reasoningEfforts(modelConfig),
 		"reasoning_disabled_supported", reasoningDisabled(modelConfig),
+		"supported_context_windows", contextWindows(modelConfig),
 		"model_config_keys", sortedKeys(modelConfig),
 		"model_config_key", firstString(modelConfig, "key", "model"),
 		"model_source", source,
 	)
 	resp, err := c.HTTP.Do(httpReq)
 	if err != nil {
-		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "duration_ms", time.Since(started).Milliseconds(), "error", err)
+		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "context_window", effectiveContextWindowLabel(req.ContextWindow), "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, err
 	}
 	slog.Info("qoder response",
@@ -288,6 +293,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"model", req.PublicModel,
 		"upstream_model", req.ModelID,
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
+		"context_window", effectiveContextWindowLabel(req.ContextWindow),
 		"status", resp.StatusCode,
 		"duration_ms", time.Since(started).Milliseconds(),
 		"content_type", resp.Header.Get("Content-Type"),
@@ -298,7 +304,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		message := strings.TrimSpace(string(data))
-		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
+		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "context_window", effectiveContextWindowLabel(req.ContextWindow), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
 		return nil, fmt.Errorf("qoder chat returned HTTP %d: %s", resp.StatusCode, message)
 	}
 	if c.UsageObserver != nil {
@@ -314,6 +320,13 @@ func effectiveReasoningLabel(effort string) string {
 		return "auto"
 	}
 	return effort
+}
+
+func effectiveContextWindowLabel(tokens int) any {
+	if tokens <= 0 {
+		return "auto"
+	}
+	return tokens
 }
 
 func messageRoles(messages []map[string]any) []string {
