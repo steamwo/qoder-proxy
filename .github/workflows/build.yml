@@ -12,6 +12,30 @@ permissions:
   contents: read
 
 jobs:
+  cleanup-artifacts:
+    name: Cleanup artifacts older than 1 day
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Delete old workflow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cutoff="$(date -u -d '1 day ago' +%s)"
+          gh api --paginate "/repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.id, .created_at, .name] | @tsv' |
+          while IFS=$'\t' read -r id created_at name; do
+            created_epoch="$(date -u -d "$created_at" +%s)"
+            if [ "$created_epoch" -lt "$cutoff" ]; then
+              echo "Deleting ${name} (${id}, ${created_at})"
+              gh api --method DELETE "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+            fi
+          done
+
   quality:
     name: Test and vet
     runs-on: ubuntu-latest
@@ -63,6 +87,7 @@ jobs:
           name: qoder-proxy-windows-amd64
           path: dist/qoder-proxy-desktop-windows-amd64.exe
           if-no-files-found: error
+          retention-days: 1
 
       - name: Upload Windows headless artifact
         uses: actions/upload-artifact@v4
@@ -70,6 +95,7 @@ jobs:
           name: qoder-proxy-headless-windows-amd64
           path: dist/qoder-proxy-headless-windows-amd64.exe
           if-no-files-found: error
+          retention-days: 1
 
       - name: Upload Windows service artifact
         uses: actions/upload-artifact@v4
@@ -77,6 +103,7 @@ jobs:
           name: qoder-proxy-service-windows-amd64
           path: dist/qoder-proxy-service-windows-amd64.exe
           if-no-files-found: error
+          retention-days: 1
 
   linux:
     name: Build Linux desktop
@@ -115,6 +142,7 @@ jobs:
           name: qoder-proxy-linux-amd64
           path: dist/qoder-proxy-desktop-linux-amd64
           if-no-files-found: error
+          retention-days: 1
 
       - name: Upload Linux service artifact
         uses: actions/upload-artifact@v4
@@ -122,6 +150,7 @@ jobs:
           name: qoder-proxy-service-linux-amd64
           path: dist/qoder-proxy-service-linux-amd64
           if-no-files-found: error
+          retention-days: 1
 
   release:
     name: Publish tagged release
