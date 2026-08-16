@@ -24,7 +24,11 @@ type Request struct {
 	ContextWindow int
 	System        string
 	Messages      []map[string]any
-	Tools         []any
+	// ImageURLs carries multimodal image references separately from the text/tool
+	// transcript because Qoder's agent endpoint exposes dedicated image_urls and
+	// chat_context.imageUrls fields. Values may be remote URLs or data URLs.
+	ImageURLs []string
+	Tools     []any
 	// ToolRoutes maps Qoder-visible function names back to downstream protocol
 	// tool identities. It lets the Responses adapter flatten namespace/tool_search
 	// tools for Qoder without losing the client-visible tool kind or namespace.
