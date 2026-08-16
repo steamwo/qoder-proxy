@@ -414,14 +414,31 @@ func messageImageURLs(messages []map[string]any) []string {
 	return out
 }
 
+// latestUserImageURLs returns compatibility attachment metadata for the active
+// input segment only. The canonical messages already retain every historical
+// image. For an initial/user turn this is the user content after the most recent
+// assistant message; for an agent tool round it is the trailing tool/user input
+// after the assistant tool call. This avoids re-sending an older user image as
+// a top-level attachment on every subsequent tool round.
 func latestUserImageURLs(messages []map[string]any) []string {
+	lastAssistant := -1
 	for i := len(messages) - 1; i >= 0; i-- {
 		role, _ := messages[i]["role"].(string)
-		if role == "user" {
-			return contentImageURLs(messages[i]["content"])
+		if strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			lastAssistant = i
+			break
 		}
 	}
-	return nil
+	out := make([]string, 0)
+	for i := lastAssistant + 1; i < len(messages); i++ {
+		role, _ := messages[i]["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+		if role != "user" && role != "tool" {
+			continue
+		}
+		out = append(out, contentImageURLs(messages[i]["content"])...)
+	}
+	return out
 }
 
 func contentImageURLs(content any) []string {
