@@ -14,6 +14,12 @@ import (
 // Claude Code's extra tool-namespace reminder is opt-in and must never leak into
 // the OpenAI protocol adapters.
 func normalizeQoderRequest(req protocol.Request) protocol.Request {
+	if req.SourceProtocol == "" && req.ClaudeToolCompatibility {
+		// The production /v1/messages compatibility path predates SourceProtocol.
+		// Infer it here so core Qoder cost/cache diagnostics remain protocol-aware
+		// without coupling the Qoder client to a particular downstream handler.
+		req.SourceProtocol = "anthropic"
+	}
 	if len(req.Messages) > 0 {
 		messagesBefore := len(req.Messages)
 		messages, stats := canonicalizeQoderToolHistory(req.Messages)
