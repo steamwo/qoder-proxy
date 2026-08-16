@@ -133,17 +133,19 @@ func normalize(req MessageRequest, model qoder.Model) (protocol.Request, error) 
 	}
 
 	messages := make([]map[string]any, 0, len(req.Messages))
+	imageURLs := make([]string, 0)
 	lastUser := ""
 	for i, raw := range req.Messages {
 		role, _ := raw["role"].(string)
 		if role != "user" && role != "assistant" {
 			return protocol.Request{}, fmt.Errorf("messages[%d].role must be user or assistant", i)
 		}
-		converted, userText, err := convertMessage(role, raw["content"])
+		converted, userText, images, err := convertMessageWithImages(role, raw["content"])
 		if err != nil {
 			return protocol.Request{}, fmt.Errorf("messages[%d]: %w", i, err)
 		}
 		messages = append(messages, converted...)
+		imageURLs = append(imageURLs, images...)
 		if userText != "" {
 			lastUser = userText
 		}
@@ -187,6 +189,7 @@ func normalize(req MessageRequest, model qoder.Model) (protocol.Request, error) 
 		ReasoningEffort: reasoningEffort,
 		System:          system,
 		Messages:        messages,
+		ImageURLs:       imageURLs,
 		Tools:           tools,
 		MaxTokens:       req.MaxTokens,
 		Temperature:     req.Temperature,
@@ -197,12 +200,17 @@ func normalize(req MessageRequest, model qoder.Model) (protocol.Request, error) 
 }
 
 func convertMessage(role string, content any) ([]map[string]any, string, error) {
+	messages, lastUser, _, err := convertMessageWithImages(role, content)
+	return messages, lastUser, err
+}
+
+func convertMessageWithImages(role string, content any) ([]map[string]any, string, []string, error) {
 	if s, ok := content.(string); ok {
-		return []map[string]any{{"role": role, "content": s}}, ternary(role == "user", s, ""), nil
+		return []map[string]any{{"role": role, "content": s}}, ternary(role == "user", s, ""), nil, nil
 	}
 	blocks, ok := content.([]any)
 	if !ok {
-		return nil, "", fmt.Errorf("content must be a string or content-block array")
+		return nil, "", nil, fmt.Errorf("content must be a string or content-block array")
 	}
 
 	if role == "assistant" {
@@ -225,7 +233,7 @@ func convertMessage(role string, content any) ([]map[string]any, string, error) 
 				}
 				name := stringValue(block["name"])
 				if name == "" {
-					return nil, "", fmt.Errorf("tool_use.name is required")
+					return nil, "", nil, fmt.Errorf("tool_use.name is required")
 				}
 				input := block["input"]
 				if input == nil {
@@ -233,7 +241,7 @@ func convertMessage(role string, content any) ([]map[string]any, string, error) 
 				}
 				b, err := json.Marshal(input)
 				if err != nil {
-					return nil, "", fmt.Errorf("invalid tool_use.input: %w", err)
+					return nil, "", nil, fmt.Errorf("invalid tool_use.input: %w", err)
 				}
 				calls = append(calls, map[string]any{
 					"id": id, "type": "function",
@@ -246,22 +254,25 @@ func convertMessage(role string, content any) ([]map[string]any, string, error) 
 			case "":
 				continue
 			default:
-				return nil, "", fmt.Errorf("unsupported assistant content block type %q", stringValue(block["type"]))
+				return nil, "", nil, fmt.Errorf("unsupported assistant content block type %q", stringValue(block["type"]))
 			}
 		}
 		msg := map[string]any{"role": "assistant", "content": strings.Join(texts, "\n")}
 		if len(calls) > 0 {
 			msg["tool_calls"] = calls
 		}
-		return []map[string]any{msg}, "", nil
+		return []map[string]any{msg}, "", nil, nil
 	}
 
 	// Anthropic tool_result blocks are carried inside a user message. Qoder's
 	// OpenAI-style request expects tool results as separate role=tool messages.
 	// Preserve the block order as far as possible by flushing adjacent text
-	// before each tool_result.
+	// before each tool_result. Image blocks are carried separately through
+	// Qoder's dedicated image_urls fields while their surrounding text stays in
+	// the normal conversation transcript.
 	out := make([]map[string]any, 0, len(blocks))
 	var textParts []string
+	imageURLs := make([]string, 0)
 	lastUser := ""
 	flushText := func() {
 		if len(textParts) == 0 {
@@ -283,15 +294,21 @@ func convertMessage(role string, content any) ([]map[string]any, string, error) 
 			if text := stringValue(block["text"]); text != "" {
 				textParts = append(textParts, text)
 			}
+		case "image":
+			imageURL, err := anthropicImageURL(block)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			imageURLs = append(imageURLs, imageURL)
 		case "tool_result":
 			flushText()
 			toolID := stringValue(block["tool_use_id"])
 			if toolID == "" {
-				return nil, "", fmt.Errorf("tool_result.tool_use_id is required")
+				return nil, "", nil, fmt.Errorf("tool_result.tool_use_id is required")
 			}
 			text, err := textContent(block["content"], true)
 			if err != nil {
-				return nil, "", fmt.Errorf("tool_result content: %w", err)
+				return nil, "", nil, fmt.Errorf("tool_result content: %w", err)
 			}
 			if text == "" {
 				text = ""
@@ -300,14 +317,41 @@ func convertMessage(role string, content any) ([]map[string]any, string, error) 
 		case "":
 			continue
 		default:
-			return nil, "", fmt.Errorf("unsupported user content block type %q", typ)
+			return nil, "", nil, fmt.Errorf("unsupported user content block type %q", typ)
 		}
 	}
 	flushText()
 	if len(out) == 0 {
 		out = append(out, map[string]any{"role": "user", "content": ""})
 	}
-	return out, lastUser, nil
+	return out, lastUser, imageURLs, nil
+}
+
+func anthropicImageURL(block map[string]any) (string, error) {
+	source, ok := block["source"].(map[string]any)
+	if !ok || source == nil {
+		return "", fmt.Errorf("image.source is required")
+	}
+	switch stringValue(source["type"]) {
+	case "base64":
+		mediaType := strings.TrimSpace(stringValue(source["media_type"]))
+		data := strings.TrimSpace(stringValue(source["data"]))
+		if mediaType == "" || data == "" {
+			return "", fmt.Errorf("base64 image source requires media_type and data")
+		}
+		if !strings.HasPrefix(strings.ToLower(mediaType), "image/") {
+			return "", fmt.Errorf("unsupported image media_type %q", mediaType)
+		}
+		return "data:" + mediaType + ";base64," + data, nil
+	case "url":
+		url := strings.TrimSpace(stringValue(source["url"]))
+		if url == "" {
+			return "", fmt.Errorf("url image source requires url")
+		}
+		return url, nil
+	default:
+		return "", fmt.Errorf("unsupported image source type %q", stringValue(source["type"]))
+	}
 }
 
 func textContent(v any, allowJSON bool) (string, error) {
@@ -472,6 +516,9 @@ func streamMessages(w http.ResponseWriter, r *http.Request, backend Backend, pre
 		return nil
 	}
 
+	// Qoder reports exact usage in its trailing stream frame, after content has
+	// already started. Keep streaming latency intact and publish the authoritative
+	// cumulative input/output usage in the final message_delta below.
 	if err := emit("message_start", map[string]any{"message": map[string]any{
 		"id": id, "type": "message", "role": "assistant", "model": req.Model,
 		"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
@@ -577,7 +624,7 @@ func streamMessages(w http.ResponseWriter, r *http.Request, backend Backend, pre
 	stop := anthropicStopReason(finish, len(tools) > 0)
 	if err := emit("message_delta", map[string]any{
 		"delta": map[string]any{"stop_reason": stop, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": usage.OutputTokens},
+		"usage": anthropicUsage(usage),
 	}); err != nil {
 		return
 	}
