@@ -95,6 +95,30 @@ func TestChatForwardsImagesAndBindsThemToUserMessage(t *testing.T) {
 	}
 }
 
+func TestChatBindsImagesOnlyToLatestUserMessage(t *testing.T) {
+	messages, err := qoderMessagesWithImages([]map[string]any{
+		{"role": "user", "content": "first"},
+		{"role": "assistant", "content": "answer"},
+		{"role": "user", "content": "describe this"},
+	}, []string{"https://example.com/latest.png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages[0]["content"] != "first" {
+		t.Fatalf("historical user message changed: %#v", messages[0])
+	}
+	content, ok := messages[2]["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("latest user content=%#v", messages[2]["content"])
+	}
+	if content[0].(map[string]any)["text"] != "describe this" {
+		t.Fatalf("latest user text=%#v", content[0])
+	}
+	if content[1].(map[string]any)["type"] != "image_url" {
+		t.Fatalf("latest image part=%#v", content[1])
+	}
+}
+
 func TestChatRejectsImagesForNonVisionModel(t *testing.T) {
 	called := false
 	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
