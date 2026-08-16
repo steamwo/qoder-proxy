@@ -32,7 +32,7 @@ func TestMessagesStreamPublishesFinalInputUsage(t *testing.T) {
 	}
 }
 
-func TestNormalizeAnthropicImages(t *testing.T) {
+func TestNormalizeAnthropicImagesStayInUserMessage(t *testing.T) {
 	req := MessageRequest{
 		Model:     "Vision Model",
 		MaxTokens: 128,
@@ -49,19 +49,70 @@ func TestNormalizeAnthropicImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantImages := []string{"data:image/png;base64,YWJj", "https://example.com/cat.jpg"}
-	if len(got.ImageURLs) != len(wantImages) {
-		t.Fatalf("images=%#v", got.ImageURLs)
+	if got.SourceProtocol != "anthropic" {
+		t.Fatalf("source protocol=%q", got.SourceProtocol)
 	}
-	for i, want := range wantImages {
-		if got.ImageURLs[i] != want {
-			t.Fatalf("image[%d]=%q want %q", i, got.ImageURLs[i], want)
-		}
-	}
-	if len(got.Messages) != 1 || got.Messages[0]["content"] != "describe these" {
+	if len(got.Messages) != 1 {
 		t.Fatalf("messages=%#v", got.Messages)
 	}
+	parts, ok := got.Messages[0]["content"].([]any)
+	if !ok || len(parts) != 3 {
+		t.Fatalf("content=%#v", got.Messages[0]["content"])
+	}
+	assertAnthropicCanonicalImage(t, parts[1], "data:image/png;base64,YWJj")
+	assertAnthropicCanonicalImage(t, parts[2], "https://example.com/cat.jpg")
 	if got.LastUserText != "describe these" {
 		t.Fatalf("last user=%q", got.LastUserText)
+	}
+}
+
+func TestNormalizeAnthropicPreservesImagesAroundToolResult(t *testing.T) {
+	req := MessageRequest{
+		Model:     "Vision Model",
+		MaxTokens: 128,
+		Messages: []map[string]any{{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": "before"},
+				map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/before.png"}},
+				map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": []any{
+					map[string]any{"type": "text", "text": "tool screenshot"},
+					map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "dG9vbA=="}},
+				}},
+				map[string]any{"type": "text", "text": "after"},
+				map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/after.png"}},
+			},
+		}},
+	}
+	got, err := normalize(req, qoder.Model{UpstreamID: "vision-id", Raw: map[string]any{"key": "vision-id", "is_vl": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("messages=%#v", got.Messages)
+	}
+	if got.Messages[0]["role"] != "user" || got.Messages[1]["role"] != "tool" || got.Messages[2]["role"] != "user" {
+		t.Fatalf("roles=%#v", got.Messages)
+	}
+	before := got.Messages[0]["content"].([]any)
+	tool := got.Messages[1]["content"].([]any)
+	after := got.Messages[2]["content"].([]any)
+	assertAnthropicCanonicalImage(t, before[1], "https://example.com/before.png")
+	assertAnthropicCanonicalImage(t, tool[1], "data:image/png;base64,dG9vbA==")
+	assertAnthropicCanonicalImage(t, after[1], "https://example.com/after.png")
+	if got.LastUserText != "after" {
+		t.Fatalf("last user=%q", got.LastUserText)
+	}
+}
+
+func assertAnthropicCanonicalImage(t *testing.T, raw any, want string) {
+	t.Helper()
+	part, ok := raw.(map[string]any)
+	if !ok || part["type"] != "image_url" {
+		t.Fatalf("image part=%#v", raw)
+	}
+	imageURL, ok := part["image_url"].(map[string]any)
+	if !ok || imageURL["url"] != want {
+		t.Fatalf("image url=%#v want %q", part["image_url"], want)
 	}
 }
