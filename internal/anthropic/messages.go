@@ -133,19 +133,17 @@ func normalize(req MessageRequest, model qoder.Model) (protocol.Request, error) 
 	}
 
 	messages := make([]map[string]any, 0, len(req.Messages))
-	imageURLs := make([]string, 0)
 	lastUser := ""
 	for i, raw := range req.Messages {
 		role, _ := raw["role"].(string)
 		if role != "user" && role != "assistant" {
 			return protocol.Request{}, fmt.Errorf("messages[%d].role must be user or assistant", i)
 		}
-		converted, userText, images, err := convertMessageWithImages(role, raw["content"])
+		converted, userText, err := convertMessage(role, raw["content"])
 		if err != nil {
 			return protocol.Request{}, fmt.Errorf("messages[%d]: %w", i, err)
 		}
 		messages = append(messages, converted...)
-		imageURLs = append(imageURLs, images...)
 		if userText != "" {
 			lastUser = userText
 		}
@@ -186,10 +184,10 @@ func normalize(req MessageRequest, model qoder.Model) (protocol.Request, error) 
 		PublicModel:     req.Model,
 		ModelID:         model.UpstreamID,
 		ModelConfig:     model.Raw,
+		SourceProtocol:  "anthropic",
 		ReasoningEffort: reasoningEffort,
 		System:          system,
 		Messages:        messages,
-		ImageURLs:       imageURLs,
 		Tools:           tools,
 		MaxTokens:       req.MaxTokens,
 		Temperature:     req.Temperature,
@@ -200,17 +198,12 @@ func normalize(req MessageRequest, model qoder.Model) (protocol.Request, error) 
 }
 
 func convertMessage(role string, content any) ([]map[string]any, string, error) {
-	messages, lastUser, _, err := convertMessageWithImages(role, content)
-	return messages, lastUser, err
-}
-
-func convertMessageWithImages(role string, content any) ([]map[string]any, string, []string, error) {
 	if s, ok := content.(string); ok {
-		return []map[string]any{{"role": role, "content": s}}, ternary(role == "user", s, ""), nil, nil
+		return []map[string]any{{"role": role, "content": s}}, ternary(role == "user", s, ""), nil
 	}
 	blocks, ok := content.([]any)
 	if !ok {
-		return nil, "", nil, fmt.Errorf("content must be a string or content-block array")
+		return nil, "", fmt.Errorf("content must be a string or content-block array")
 	}
 
 	if role == "assistant" {
@@ -233,7 +226,7 @@ func convertMessageWithImages(role string, content any) ([]map[string]any, strin
 				}
 				name := stringValue(block["name"])
 				if name == "" {
-					return nil, "", nil, fmt.Errorf("tool_use.name is required")
+					return nil, "", fmt.Errorf("tool_use.name is required")
 				}
 				input := block["input"]
 				if input == nil {
@@ -241,7 +234,7 @@ func convertMessageWithImages(role string, content any) ([]map[string]any, strin
 				}
 				b, err := json.Marshal(input)
 				if err != nil {
-					return nil, "", nil, fmt.Errorf("invalid tool_use.input: %w", err)
+					return nil, "", fmt.Errorf("invalid tool_use.input: %w", err)
 				}
 				calls = append(calls, map[string]any{
 					"id": id, "type": "function",
@@ -254,34 +247,34 @@ func convertMessageWithImages(role string, content any) ([]map[string]any, strin
 			case "":
 				continue
 			default:
-				return nil, "", nil, fmt.Errorf("unsupported assistant content block type %q", stringValue(block["type"]))
+				return nil, "", fmt.Errorf("unsupported assistant content block type %q", stringValue(block["type"]))
 			}
 		}
 		msg := map[string]any{"role": "assistant", "content": strings.Join(texts, "\n")}
 		if len(calls) > 0 {
 			msg["tool_calls"] = calls
 		}
-		return []map[string]any{msg}, "", nil, nil
+		return []map[string]any{msg}, "", nil
 	}
 
-	// Anthropic tool_result blocks are carried inside a user message. Qoder's
-	// OpenAI-style request expects tool results as separate role=tool messages.
-	// Preserve the block order as far as possible by flushing adjacent text
-	// before each tool_result. Image blocks are carried separately through
-	// Qoder's dedicated image_urls fields while their surrounding text stays in
-	// the normal conversation transcript.
+	// Anthropic tool_result blocks live inside a user message. Preserve block
+	// ordering by flushing ordinary user content before each tool result. Images
+	// stay in the exact message segment that supplied them instead of being moved
+	// into a request-global side channel.
 	out := make([]map[string]any, 0, len(blocks))
-	var textParts []string
-	imageURLs := make([]string, 0)
+	parts := make([]any, 0)
+	segmentText := make([]string, 0)
 	lastUser := ""
-	flushText := func() {
-		if len(textParts) == 0 {
+	flushUser := func() {
+		if len(parts) == 0 {
 			return
 		}
-		text := strings.Join(textParts, "\n")
-		out = append(out, map[string]any{"role": "user", "content": text})
-		lastUser = text
-		textParts = nil
+		out = append(out, map[string]any{"role": "user", "content": compactCanonicalContent(parts)})
+		if len(segmentText) > 0 {
+			lastUser = strings.Join(segmentText, "\n")
+		}
+		parts = nil
+		segmentText = nil
 	}
 	for _, raw := range blocks {
 		block, ok := raw.(map[string]any)
@@ -292,39 +285,103 @@ func convertMessageWithImages(role string, content any) ([]map[string]any, strin
 		switch typ {
 		case "text":
 			if text := stringValue(block["text"]); text != "" {
-				textParts = append(textParts, text)
+				parts = append(parts, map[string]any{"type": "text", "text": text})
+				segmentText = append(segmentText, text)
 			}
 		case "image":
 			imageURL, err := anthropicImageURL(block)
 			if err != nil {
-				return nil, "", nil, err
+				return nil, "", err
 			}
-			imageURLs = append(imageURLs, imageURL)
+			parts = append(parts, canonicalImagePart(imageURL))
 		case "tool_result":
-			flushText()
+			flushUser()
 			toolID := stringValue(block["tool_use_id"])
 			if toolID == "" {
-				return nil, "", nil, fmt.Errorf("tool_result.tool_use_id is required")
+				return nil, "", fmt.Errorf("tool_result.tool_use_id is required")
 			}
-			text, err := textContent(block["content"], true)
+			toolContent, err := canonicalToolResultContent(block["content"])
 			if err != nil {
-				return nil, "", nil, fmt.Errorf("tool_result content: %w", err)
+				return nil, "", fmt.Errorf("tool_result content: %w", err)
 			}
-			if text == "" {
-				text = ""
-			}
-			out = append(out, map[string]any{"role": "tool", "tool_call_id": toolID, "content": text})
+			out = append(out, map[string]any{"role": "tool", "tool_call_id": toolID, "content": toolContent})
 		case "":
 			continue
 		default:
-			return nil, "", nil, fmt.Errorf("unsupported user content block type %q", typ)
+			return nil, "", fmt.Errorf("unsupported user content block type %q", typ)
 		}
 	}
-	flushText()
+	flushUser()
 	if len(out) == 0 {
 		out = append(out, map[string]any{"role": "user", "content": ""})
 	}
-	return out, lastUser, imageURLs, nil
+	return out, lastUser, nil
+}
+
+func canonicalImagePart(imageURL string) map[string]any {
+	return map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": strings.TrimSpace(imageURL),
+		},
+	}
+}
+
+func compactCanonicalContent(parts []any) any {
+	if len(parts) == 0 {
+		return ""
+	}
+	texts := make([]string, 0, len(parts))
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok || stringValue(part["type"]) != "text" {
+			return parts
+		}
+		if text := stringValue(part["text"]); text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
+func canonicalToolResultContent(v any) (any, error) {
+	if v == nil {
+		return "", nil
+	}
+	if s, ok := v.(string); ok {
+		return s, nil
+	}
+	blocks, ok := v.([]any)
+	if !ok {
+		b, err := json.Marshal(v)
+		return string(b), err
+	}
+	parts := make([]any, 0, len(blocks))
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch stringValue(block["type"]) {
+		case "text", "":
+			if text := stringValue(block["text"]); text != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": text})
+			}
+		case "image":
+			imageURL, err := anthropicImageURL(block)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, canonicalImagePart(imageURL))
+		default:
+			b, err := json.Marshal(block)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, map[string]any{"type": "text", "text": string(b)})
+		}
+	}
+	return compactCanonicalContent(parts), nil
 }
 
 func anthropicImageURL(block map[string]any) (string, error) {
