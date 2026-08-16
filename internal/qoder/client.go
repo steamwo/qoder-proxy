@@ -186,8 +186,12 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	if tools == nil {
 		tools = []any{}
 	}
+	messages, err := qoderMessagesWithImages(req.Messages, req.ImageURLs)
+	if err != nil {
+		return nil, err
+	}
 	requestSetID := requestSetIDForRequest(req, sessionID)
-	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, req.Messages, req.ImageURLs, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
+	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, messages, req.ImageURLs, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
 	isRetry := attempt > 0
@@ -205,6 +209,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	} else if req.ReasoningEffort != "" {
 		isReasoning = true
 	}
+	isVL := boolField(modelConfig, "is_vl")
 	body := map[string]any{
 		"request_id":       requestID,
 		"request_set_id":   requestSetID,
@@ -224,14 +229,14 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"image_urls":       req.ImageURLs,
 		"aliyun_user_type": "",
 		"system":           req.System,
-		"messages":         req.Messages,
+		"messages":         messages,
 		"tools":            tools,
 		"parameters":       parameters,
 		"chat_context": map[string]any{
 			"chatPrompt": "", "imageUrls": req.ImageURLs,
 			"extra": map[string]any{
 				"context":         []any{},
-				"modelConfig":     map[string]any{"key": req.ModelID, "is_reasoning": isReasoning},
+				"modelConfig":     map[string]any{"key": req.ModelID, "is_reasoning": isReasoning, "is_vl": isVL},
 				"originalContent": req.LastUserText,
 			},
 			"features": []any{}, "text": req.LastUserText,
@@ -291,10 +296,14 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"body_bytes", len(plainBody),
 		"encoded_body_bytes", len(encodedBody),
 		"encoded", true,
-		"messages", len(req.Messages),
-		"roles", messageRoles(req.Messages),
+		"messages", len(messages),
+		"roles", messageRoles(messages),
+		"messages_json_bytes", jsonSize(messages),
+		"system_bytes", len(req.System),
+		"tools_json_bytes", jsonSize(tools),
 		"last_user_bytes", len(req.LastUserText),
 		"images", len(req.ImageURLs),
+		"image_transport_bytes", imageTransportBytes(req.ImageURLs),
 		"tools", len(tools),
 		"max_tokens", maxTokens,
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
@@ -340,6 +349,76 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		resp.Body = observeUsageBody(resp.Body, c.UsageObserver)
 	}
 	return resp, nil
+}
+
+func qoderMessagesWithImages(messages []map[string]any, imageURLs []string) ([]map[string]any, error) {
+	if len(imageURLs) == 0 {
+		return messages, nil
+	}
+	out := make([]map[string]any, len(messages))
+	lastUser := -1
+	for i, message := range messages {
+		copyMessage := make(map[string]any, len(message))
+		for key, value := range message {
+			copyMessage[key] = value
+		}
+		out[i] = copyMessage
+		if role, _ := copyMessage["role"].(string); role == "user" {
+			lastUser = i
+		}
+	}
+	if lastUser < 0 {
+		return nil, &UpstreamError{
+			HTTPStatus:  http.StatusBadRequest,
+			QoderStatus: http.StatusBadRequest,
+			PublicCode:  "invalid_image_input",
+			Type:        "invalid_request_error",
+			Message:     "image input requires a user message",
+		}
+	}
+
+	parts := make([]any, 0, len(imageURLs)+1)
+	switch content := out[lastUser]["content"].(type) {
+	case string:
+		if content != "" {
+			parts = append(parts, map[string]any{"type": "text", "text": content})
+		}
+	case []any:
+		parts = append(parts, content...)
+	case nil:
+	default:
+		parts = append(parts, map[string]any{"type": "text", "text": fmt.Sprint(content)})
+	}
+	for _, imageURL := range imageURLs {
+		imageURL = strings.TrimSpace(imageURL)
+		if imageURL == "" {
+			continue
+		}
+		parts = append(parts, map[string]any{
+			"type": "image_url",
+			"image_url": map[string]any{
+				"url": imageURL,
+			},
+		})
+	}
+	out[lastUser]["content"] = parts
+	return out, nil
+}
+
+func jsonSize(value any) int {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return 0
+	}
+	return len(data)
+}
+
+func imageTransportBytes(imageURLs []string) int {
+	total := 0
+	for _, imageURL := range imageURLs {
+		total += len(imageURL)
+	}
+	return total
 }
 
 // effectiveReasoningLabel makes the upstream automatic behavior explicit instead of leaving logs blank.
