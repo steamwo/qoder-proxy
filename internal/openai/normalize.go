@@ -40,7 +40,7 @@ type ResponsesRequest struct {
 }
 
 func NormalizeChat(req ChatRequest, model qoder.Model) (protocol.Request, error) {
-	messages, system, lastUser := normalizeMessages(req.Messages)
+	messages, system, lastUser, imageURLs := normalizeMessagesWithImages(req.Messages)
 	reasoningEffort, err := model.NormalizeReasoningEffort(req.ReasoningEffort)
 	if err != nil {
 		return protocol.Request{}, err
@@ -52,7 +52,7 @@ func NormalizeChat(req ChatRequest, model qoder.Model) (protocol.Request, error)
 	return protocol.Request{
 		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw,
 		ReasoningEffort: reasoningEffort,
-		System:          system, Messages: messages, Tools: req.Tools, MaxTokens: max,
+		System:          system, Messages: messages, ImageURLs: imageURLs, Tools: req.Tools, MaxTokens: max,
 		Temperature: req.Temperature, TopP: req.TopP, Stop: req.Stop, LastUserText: lastUser,
 	}, nil
 }
@@ -136,14 +136,14 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 			}
 		}
 	}
-	messages, system, lastUser := normalizeMessages(rawMessages)
+	messages, system, lastUser, imageURLs := normalizeMessagesWithImages(rawMessages)
 	if len(systemParts) > 0 {
 		system = strings.Join(append(systemParts, system), "\n\n")
 		system = strings.TrimSpace(system)
 	}
 
 	return protocol.Request{
-		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw, ReasoningEffort: reasoningEffort, System: system, Messages: messages, Tools: tools, ToolRoutes: routes,
+		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw, ReasoningEffort: reasoningEffort, System: system, Messages: messages, ImageURLs: imageURLs, Tools: tools, ToolRoutes: routes,
 		MaxTokens: req.MaxOutputTokens, Temperature: req.Temperature, TopP: req.TopP, LastUserText: lastUser,
 	}, nil
 }
@@ -340,23 +340,32 @@ func mapsFromAny(v any) []map[string]any {
 }
 
 func normalizeMessages(input []map[string]any) ([]map[string]any, string, string) {
+	out, system, lastUser, _ := normalizeMessagesWithImages(input)
+	return out, system, lastUser
+}
+
+func normalizeMessagesWithImages(input []map[string]any) ([]map[string]any, string, string, []string) {
 	out := make([]map[string]any, 0, len(input))
 	var systemParts []string
+	imageURLs := make([]string, 0)
 	lastUser := ""
 	for _, raw := range input {
 		role := asString(raw["role"])
 		if role == "" {
 			role = "user"
 		}
-		text := contentText(raw["content"])
+		text, images := contentTextAndImages(raw["content"])
 		if role == "system" || role == "developer" {
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
 			continue
 		}
-		if role == "user" && text != "" {
-			lastUser = text
+		if role == "user" {
+			imageURLs = append(imageURLs, images...)
+			if text != "" {
+				lastUser = text
+			}
 		}
 		m := make(map[string]any, len(raw)+2)
 		for k, v := range raw {
@@ -366,18 +375,24 @@ func normalizeMessages(input []map[string]any) ([]map[string]any, string, string
 		m["content"] = text
 		out = append(out, m)
 	}
-	return out, strings.Join(systemParts, "\n\n"), lastUser
+	return out, strings.Join(systemParts, "\n\n"), lastUser, imageURLs
 }
 
 func contentText(v any) string {
+	text, _ := contentTextAndImages(v)
+	return text
+}
+
+func contentTextAndImages(v any) (string, []string) {
 	if s, ok := v.(string); ok {
-		return s
+		return s, nil
 	}
 	arr, ok := v.([]any)
 	if !ok {
-		return valueText(v)
+		return valueText(v), nil
 	}
 	var parts []string
+	images := make([]string, 0)
 	for _, raw := range arr {
 		switch p := raw.(type) {
 		case string:
@@ -385,13 +400,34 @@ func contentText(v any) string {
 				parts = append(parts, p)
 			}
 		case map[string]any:
+			if imageURL := imageURLFromPart(p); imageURL != "" {
+				images = append(images, imageURL)
+				continue
+			}
 			if s := firstString(p, "text", "content"); s != "" {
 				parts = append(parts, s)
 			}
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), images
 }
+
+func imageURLFromPart(part map[string]any) string {
+	typ := strings.ToLower(strings.TrimSpace(asString(part["type"])))
+	if typ != "image_url" && typ != "input_image" && typ != "image" {
+		return ""
+	}
+	if value := part["image_url"]; value != nil {
+		switch image := value.(type) {
+		case string:
+			return strings.TrimSpace(image)
+		case map[string]any:
+			return strings.TrimSpace(asString(image["url"]))
+		}
+	}
+	return strings.TrimSpace(asString(part["url"]))
+}
+
 func valueText(v any) string {
 	if s, ok := v.(string); ok {
 		return s
