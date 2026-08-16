@@ -141,6 +141,47 @@ func TestChatDoesNotPromoteHistoricalImageToLatestUser(t *testing.T) {
 	}
 }
 
+func TestChatProjectsToolResultImageWithoutRepeatingPreviousUserImage(t *testing.T) {
+	var body map[string]any
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		encoded, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain := decodeQoderBodyForTest(t, encoded)
+		if err := json.Unmarshal(plain, &body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n")), Request: r}, nil
+	})}
+	c := NewClient(hc, credential.Credential{Token: "token", UserID: "u1", MachineID: "m1"})
+	messages := []map[string]any{
+		{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "inspect this"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/original.png"}},
+		}},
+		{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{
+			"id": "call_1", "type": "function", "function": map[string]any{"name": "screenshot", "arguments": "{}"},
+		}}},
+		{"role": "tool", "tool_call_id": "call_1", "content": []any{
+			map[string]any{"type": "text", "text": "latest screenshot"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,dG9vbA=="}},
+		}},
+	}
+	resp, err := c.Chat(context.Background(), protocol.Request{
+		PublicModel: "Vision Model", ModelID: "vision-id",
+		ModelConfig: map[string]any{"key": "vision-id", "is_vl": true}, Messages: messages,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	images, ok := body["image_urls"].([]any)
+	if !ok || len(images) != 1 || images[0] != "data:image/png;base64,dG9vbA==" {
+		t.Fatalf("active tool image projection=%#v", body["image_urls"])
+	}
+}
+
 func TestChatRejectsImagesForNonVisionModel(t *testing.T) {
 	called := false
 	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
