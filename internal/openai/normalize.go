@@ -40,7 +40,7 @@ type ResponsesRequest struct {
 }
 
 func NormalizeChat(req ChatRequest, model qoder.Model) (protocol.Request, error) {
-	messages, system, lastUser, imageURLs := normalizeMessagesWithImages(req.Messages)
+	messages, system, lastUser := normalizeMessages(req.Messages)
 	reasoningEffort, err := model.NormalizeReasoningEffort(req.ReasoningEffort)
 	if err != nil {
 		return protocol.Request{}, err
@@ -51,8 +51,9 @@ func NormalizeChat(req ChatRequest, model qoder.Model) (protocol.Request, error)
 	}
 	return protocol.Request{
 		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw,
+		SourceProtocol:  "openai_chat",
 		ReasoningEffort: reasoningEffort,
-		System:          system, Messages: messages, ImageURLs: imageURLs, Tools: req.Tools, MaxTokens: max,
+		System:          system, Messages: messages, Tools: req.Tools, MaxTokens: max,
 		Temperature: req.Temperature, TopP: req.TopP, Stop: req.Stop, LastUserText: lastUser,
 	}, nil
 }
@@ -102,7 +103,9 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), qoderName, item["arguments"]))
 				continue
 			case "function_call_output":
-				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": valueText(item["output"])})
+				// Keep structured output intact so image content returned by tools is
+				// normalized as multimodal content instead of being JSON-stringified.
+				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": item["output"]})
 				continue
 			case "tool_search_call":
 				qoderName := responseToolAlias(routes, "tool_search", "", "tool_search")
@@ -136,14 +139,16 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 			}
 		}
 	}
-	messages, system, lastUser, imageURLs := normalizeMessagesWithImages(rawMessages)
+	messages, system, lastUser := normalizeMessages(rawMessages)
 	if len(systemParts) > 0 {
 		system = strings.Join(append(systemParts, system), "\n\n")
 		system = strings.TrimSpace(system)
 	}
 
 	return protocol.Request{
-		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw, ReasoningEffort: reasoningEffort, System: system, Messages: messages, ImageURLs: imageURLs, Tools: tools, ToolRoutes: routes,
+		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw,
+		SourceProtocol: "openai_responses", ReasoningEffort: reasoningEffort,
+		System: system, Messages: messages, Tools: tools, ToolRoutes: routes,
 		MaxTokens: req.MaxOutputTokens, Temperature: req.Temperature, TopP: req.TopP, LastUserText: lastUser,
 	}, nil
 }
@@ -339,77 +344,109 @@ func mapsFromAny(v any) []map[string]any {
 	}
 }
 
+// normalizeMessages keeps multimodal content attached to the message that
+// supplied it. Text-only content remains a string to preserve the compact
+// request shape used by Qoder; messages containing images use canonical
+// OpenAI-style text/image_url content parts.
 func normalizeMessages(input []map[string]any) ([]map[string]any, string, string) {
-	out, system, lastUser, _ := normalizeMessagesWithImages(input)
-	return out, system, lastUser
-}
-
-func normalizeMessagesWithImages(input []map[string]any) ([]map[string]any, string, string, []string) {
 	out := make([]map[string]any, 0, len(input))
 	var systemParts []string
-	imageURLs := make([]string, 0)
 	lastUser := ""
 	for _, raw := range input {
 		role := asString(raw["role"])
 		if role == "" {
 			role = "user"
 		}
-		text, images := contentTextAndImages(raw["content"])
+		content, text := canonicalMessageContent(raw["content"])
 		if role == "system" || role == "developer" {
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
 			continue
 		}
-		if role == "user" {
-			imageURLs = append(imageURLs, images...)
-			if text != "" {
-				lastUser = text
-			}
+		if role == "user" && text != "" {
+			lastUser = text
 		}
 		m := make(map[string]any, len(raw)+2)
 		for k, v := range raw {
 			m[k] = v
 		}
 		m["role"] = role
-		m["content"] = text
+		m["content"] = content
 		out = append(out, m)
 	}
-	return out, strings.Join(systemParts, "\n\n"), lastUser, imageURLs
+	return out, strings.Join(systemParts, "\n\n"), lastUser
 }
 
-func contentText(v any) string {
-	text, _ := contentTextAndImages(v)
-	return text
-}
-
-func contentTextAndImages(v any) (string, []string) {
+func canonicalMessageContent(v any) (any, string) {
 	if s, ok := v.(string); ok {
-		return s, nil
+		return s, s
 	}
-	arr, ok := v.([]any)
-	if !ok {
-		return valueText(v), nil
+	if m, ok := v.(map[string]any); ok {
+		if imageURL := imageURLFromPart(m); imageURL != "" {
+			return []any{canonicalImagePart(imageURL)}, ""
+		}
+		if text := firstString(m, "text", "content", "refusal"); text != "" {
+			return text, text
+		}
+		text := valueText(v)
+		return text, text
 	}
-	var parts []string
-	images := make([]string, 0)
+	var arr []any
+	switch items := v.(type) {
+	case []any:
+		arr = items
+	case []map[string]any:
+		arr = make([]any, 0, len(items))
+		for _, item := range items {
+			arr = append(arr, item)
+		}
+	default:
+		text := valueText(v)
+		return text, text
+	}
+
+	parts := make([]any, 0, len(arr))
+	textParts := make([]string, 0, len(arr))
+	hasImage := false
 	for _, raw := range arr {
-		switch p := raw.(type) {
+		switch part := raw.(type) {
 		case string:
-			if p != "" {
-				parts = append(parts, p)
+			if part != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": part})
+				textParts = append(textParts, part)
 			}
 		case map[string]any:
-			if imageURL := imageURLFromPart(p); imageURL != "" {
-				images = append(images, imageURL)
+			if imageURL := imageURLFromPart(part); imageURL != "" {
+				hasImage = true
+				parts = append(parts, canonicalImagePart(imageURL))
 				continue
 			}
-			if s := firstString(p, "text", "content"); s != "" {
-				parts = append(parts, s)
+			if text := firstString(part, "text", "content", "refusal"); text != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": text})
+				textParts = append(textParts, text)
 			}
 		}
 	}
-	return strings.Join(parts, "\n"), images
+	text := strings.Join(textParts, "\n")
+	if !hasImage {
+		return text, text
+	}
+	return parts, text
+}
+
+func canonicalImagePart(imageURL string) map[string]any {
+	return map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": strings.TrimSpace(imageURL),
+		},
+	}
+}
+
+func contentText(v any) string {
+	_, text := canonicalMessageContent(v)
+	return text
 }
 
 func imageURLFromPart(part map[string]any) string {
@@ -425,7 +462,7 @@ func imageURLFromPart(part map[string]any) string {
 			return strings.TrimSpace(asString(image["url"]))
 		}
 	}
-	return strings.TrimSpace(asString(part["url"]))
+	return strings.TrimSpace(firstString(part, "url", "image_url"))
 }
 
 func valueText(v any) string {
