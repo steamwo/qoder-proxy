@@ -10,11 +10,11 @@ import (
 // Client-side agent loops append assistant/tool messages after the latest real
 // user turn, so hashing only the conversation prefix through that user turn
 // keeps request_set_id stable across tool round-trips while a subsequent user
-// instruction naturally starts a new request set. Explicit context-window
-// selection and image inputs are part of the task identity so different Qoder
-// context or multimodal requests cannot collide in one request set.
+// instruction naturally starts a new request set. Multimodal content is already
+// part of each canonical message, so image identity follows the same boundary
+// instead of being hashed through a request-global side channel.
 func requestSetIDForRequest(req protocol.Request, sessionID string) string {
-	return stableHash("qoder-request-set", sessionID, req.ModelID, req.ContextWindow, requestSetMessagePrefix(req.Messages), req.ImageURLs)
+	return stableHash("qoder-request-set", sessionID, req.ModelID, req.ContextWindow, requestSetMessagePrefix(req.Messages))
 }
 
 func requestSetMessagePrefix(messages []map[string]any) []map[string]any {
