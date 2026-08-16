@@ -13,7 +13,7 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/protocol"
 )
 
-func TestChatForwardsImageURLs(t *testing.T) {
+func TestChatForwardsImagesAndBindsThemToUserMessage(t *testing.T) {
 	var body map[string]any
 	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		encoded, err := io.ReadAll(r.Body)
@@ -64,6 +64,35 @@ func TestChatForwardsImageURLs(t *testing.T) {
 		t.Fatalf("chat_context=%#v", body["chat_context"])
 	}
 	assertImageArray("chat_context.imageUrls", chatContext["imageUrls"])
+	extra := chatContext["extra"].(map[string]any)
+	modelConfig := extra["modelConfig"].(map[string]any)
+	if modelConfig["is_vl"] != true {
+		t.Fatalf("chat_context modelConfig=%#v", modelConfig)
+	}
+
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("messages=%#v", body["messages"])
+	}
+	user := messages[0].(map[string]any)
+	content, ok := user["content"].([]any)
+	if !ok || len(content) != 3 {
+		t.Fatalf("user content=%#v", user["content"])
+	}
+	text := content[0].(map[string]any)
+	if text["type"] != "text" || text["text"] != "describe" {
+		t.Fatalf("text part=%#v", text)
+	}
+	for i, want := range images {
+		part := content[i+1].(map[string]any)
+		if part["type"] != "image_url" {
+			t.Fatalf("image part[%d]=%#v", i, part)
+		}
+		imageURL := part["image_url"].(map[string]any)
+		if imageURL["url"] != want {
+			t.Fatalf("image part[%d] url=%#v want %q", i, imageURL["url"], want)
+		}
+	}
 }
 
 func TestChatRejectsImagesForNonVisionModel(t *testing.T) {
