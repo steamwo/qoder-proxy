@@ -82,10 +82,12 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 			discoveredTools = append(discoveredTools, mapsFromAny(item["tools"])...)
 		}
 	}
-	allTools := make([]map[string]any, 0, len(req.Tools)+len(discoveredTools))
-	allTools = append(allTools, req.Tools...)
-	allTools = append(allTools, discoveredTools...)
-	tools, routes := normalizeResponsesTools(allTools)
+	// Respect client-side deferred tool semantics. Initial tools explicitly
+	// marked defer_loading stay out of Qoder's model-visible tool schemas when a
+	// tool_search entry point exists. Tools returned by tool_search_output or
+	// additional_tools are considered discovered and are therefore included even
+	// if their original declaration still carries defer_loading=true.
+	tools, routes := normalizeResponsesToolSets(req.Tools, discoveredTools)
 
 	var rawMessages []map[string]any
 	var systemParts []string
@@ -177,28 +179,43 @@ func argumentsText(v any) string {
 }
 
 func normalizeResponsesTools(input []map[string]any) ([]any, map[string]protocol.ToolRoute) {
-	out := make([]any, 0, len(input))
+	return normalizeResponsesToolSets(input, nil)
+}
+
+func normalizeResponsesToolSets(initial, discovered []map[string]any) ([]any, map[string]protocol.ToolRoute) {
+	out := make([]any, 0, len(initial)+len(discovered))
 	routes := make(map[string]protocol.ToolRoute)
 	usedAliases := make(map[string]string)
 	seenTargets := make(map[string]bool)
+	hasToolSearch := false
 
 	// Reserve tool_search first so a client function coincidentally named
 	// tool_search cannot steal the discoverability entry point used by Codex.
-	for _, tool := range input {
+	for _, tool := range initial {
 		if asString(tool["type"]) == "tool_search" {
-			appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "")
+			hasToolSearch = true
+			appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "", false, false)
 		}
 	}
-	for _, tool := range input {
+	for _, tool := range initial {
 		if asString(tool["type"]) == "tool_search" {
 			continue
 		}
-		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "")
+		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "", hasToolSearch, false)
+	}
+	for _, tool := range discovered {
+		// A discovered tool has already crossed the client's search boundary and
+		// must be callable on this turn even if its source declaration is marked
+		// defer_loading.
+		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "", false, true)
 	}
 	return out, routes
 }
 
-func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedAliases map[string]string, seenTargets map[string]bool, tool map[string]any, namespace, namespaceDescription string) {
+func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedAliases map[string]string, seenTargets map[string]bool, tool map[string]any, namespace, namespaceDescription string, deferEnabled, includeDeferred bool) {
+	if deferEnabled && !includeDeferred && responsesToolDeferred(tool) && asString(tool["type"]) != "tool_search" {
+		return
+	}
 	typ := asString(tool["type"])
 	switch typ {
 	case "namespace":
@@ -208,7 +225,7 @@ func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedA
 		}
 		desc := strings.TrimSpace(asString(tool["description"]))
 		for _, child := range mapsFromAny(tool["tools"]) {
-			appendResponsesTool(out, routes, usedAliases, seenTargets, child, ns, desc)
+			appendResponsesTool(out, routes, usedAliases, seenTargets, child, ns, desc, deferEnabled, includeDeferred)
 		}
 	case "tool_search":
 		key := "tool_search\x00client"
@@ -264,6 +281,11 @@ func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedA
 		*out = append(*out, map[string]any{"type": "function", "function": fn})
 		routes[alias] = protocol.ToolRoute{Kind: "function", Name: name, Namespace: namespace}
 	}
+}
+
+func responsesToolDeferred(tool map[string]any) bool {
+	deferred, _ := tool["defer_loading"].(bool)
+	return deferred
 }
 
 func responseToolAlias(routes map[string]protocol.ToolRoute, kind, namespace, name string) string {
