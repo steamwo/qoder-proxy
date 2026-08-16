@@ -173,7 +173,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		tools = []any{}
 	}
 	requestSetID := requestSetIDForRequest(req, sessionID)
-	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
+	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, req.Messages, req.ImageURLs, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
 	isRetry := attempt > 0
@@ -207,14 +207,14 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"task_id":          DefaultTask,
 		"code_language":    "",
 		"chat_prompt":      "",
-		"image_urls":       nil,
+		"image_urls":       req.ImageURLs,
 		"aliyun_user_type": "",
 		"system":           req.System,
 		"messages":         req.Messages,
 		"tools":            tools,
 		"parameters":       parameters,
 		"chat_context": map[string]any{
-			"chatPrompt": "", "imageUrls": nil,
+			"chatPrompt": "", "imageUrls": req.ImageURLs,
 			"extra": map[string]any{
 				"context":         []any{},
 				"modelConfig":     map[string]any{"key": req.ModelID, "is_reasoning": isReasoning},
@@ -280,6 +280,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"messages", len(req.Messages),
 		"roles", messageRoles(req.Messages),
 		"last_user_bytes", len(req.LastUserText),
+		"images", len(req.ImageURLs),
 		"tools", len(tools),
 		"max_tokens", maxTokens,
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
