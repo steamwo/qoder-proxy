@@ -70,6 +70,20 @@ func (c *Client) Chat(ctx context.Context, req protocol.Request) (*http.Response
 // key is reused across turns; when no such key is available, the public API
 // request gets an isolated session.
 func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(QueueInfo) error) (*http.Response, error) {
+	if len(req.ImageURLs) > 0 && !boolField(req.ModelConfig, "is_vl") {
+		modelName := strings.TrimSpace(req.PublicModel)
+		if modelName == "" {
+			modelName = req.ModelID
+		}
+		return nil, &UpstreamError{
+			HTTPStatus:  http.StatusBadRequest,
+			QoderStatus: http.StatusBadRequest,
+			PublicCode:  "unsupported_image_input",
+			Type:        "invalid_request_error",
+			Message:     fmt.Sprintf("model %q does not support image input", modelName),
+		}
+	}
+
 	policy := c.QueueRetry
 	if policy.MaxRetries < 0 {
 		policy.MaxRetries = 0
