@@ -113,21 +113,9 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 		}
 	}
 
-	tools := make([]any, 0, len(req.Tools))
-	for i, tool := range req.Tools {
-		name := stringValue(tool["name"])
-		if name == "" {
-			return protocol.Request{}, fmt.Errorf("tools[%d].name is required", i)
-		}
-		schema := tool["input_schema"]
-		if schema == nil {
-			schema = map[string]any{"type": "object", "properties": map[string]any{}}
-		}
-		fn := map[string]any{"name": name, "parameters": schema}
-		if desc := stringValue(tool["description"]); desc != "" {
-			fn["description"] = desc
-		}
-		tools = append(tools, map[string]any{"type": "function", "function": fn})
+	tools, deferredTools, err := normalizeAnthropicTools(req.Tools)
+	if err != nil {
+		return protocol.Request{}, err
 	}
 
 	var stop any
@@ -145,7 +133,9 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 		"model", req.Model,
 		"system_bytes", len(system),
 		"messages", len(messages),
-		"tools", len(tools),
+		"tools_received", len(req.Tools),
+		"tools_visible", len(tools),
+		"deferred_tools_omitted", deferredTools,
 		"workspace_present", workingDirectory != "",
 		"workspace_source", workspaceSource,
 		"workspace_bytes", len(workingDirectory),
@@ -156,6 +146,7 @@ func normalizeNativeMessages(req MessageRequest, model qoder.Model) (protocol.Re
 		PublicModel:              req.Model,
 		ModelID:                  model.UpstreamID,
 		ModelConfig:              model.Raw,
+		SourceProtocol:           "anthropic",
 		ReasoningEffort:          reasoningEffort,
 		System:                   system,
 		Messages:                 messages,
