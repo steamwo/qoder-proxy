@@ -3,7 +3,6 @@ package qoder
 import (
 	"bytes"
 	"io"
-	"log/slog"
 	"sync"
 
 	"github.com/steamwo/qoder-proxy/internal/protocol"
@@ -58,12 +57,6 @@ func (r *usageObservingReadCloser) finish() {
 		if len(r.tail) == 0 {
 			return
 		}
-
-		// Temporary real-upstream diagnostic: dump the raw tail of Qoder's SSE
-		// response so cache/usage fields can be inspected exactly as returned.
-		// This may include model output content and must be removed after testing.
-		slog.Info("qoder raw response tail", "bytes", len(r.tail), "raw", string(r.tail))
-
 		var last protocol.Usage
 		found := false
 		_ = ParseStream(bytes.NewReader(r.tail), func(ev protocol.Event) error {
