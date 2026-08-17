@@ -2,6 +2,7 @@ package qoder
 
 import (
 	"context"
+	"log"
 	"log/slog"
 	"sync"
 )
@@ -28,12 +29,27 @@ type costSessionSnapshot struct {
 
 func init() {
 	base := slog.Default()
+
+	// slog.SetDefault bridges the standard log package back through the new slog
+	// handler when the handler is not Go's built-in default handler. Because this
+	// wrapper delegates to that built-in handler, leaving the bridge installed
+	// would form a log -> slog -> defaultHandler -> log recursion. Preserve and
+	// restore the standard logger state around SetDefault to keep the original
+	// output behavior while safely enriching slog records.
+	standardWriter := log.Writer()
+	standardFlags := log.Flags()
+	standardPrefix := log.Prefix()
+
 	slog.SetDefault(slog.New(&costDiagnosticHandler{
 		next: base.Handler(),
 		state: &costDiagnosticState{
 			sessions: make(map[string]costSessionSnapshot),
 		},
 	}))
+
+	log.SetOutput(standardWriter)
+	log.SetFlags(standardFlags)
+	log.SetPrefix(standardPrefix)
 }
 
 func (h *costDiagnosticHandler) Enabled(ctx context.Context, level slog.Level) bool {
