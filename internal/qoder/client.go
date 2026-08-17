@@ -61,6 +61,14 @@ func stableHash(parts ...any) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func shortStableHash(parts ...any) string {
+	hash := stableHash(parts...)
+	if len(hash) <= 16 {
+		return hash
+	}
+	return hash[:16]
+}
+
 func (c *Client) Chat(ctx context.Context, req protocol.Request) (*http.Response, error) {
 	return c.ChatWithQueue(ctx, req, nil)
 }
@@ -70,6 +78,20 @@ func (c *Client) Chat(ctx context.Context, req protocol.Request) (*http.Response
 // key is reused across turns; when no such key is available, the public API
 // request gets an isolated session.
 func (c *Client) ChatWithQueue(ctx context.Context, req protocol.Request, onQueue func(QueueInfo) error) (*http.Response, error) {
+	if len(messageImageURLs(req.Messages)) > 0 && !boolField(req.ModelConfig, "is_vl") {
+		modelName := strings.TrimSpace(req.PublicModel)
+		if modelName == "" {
+			modelName = req.ModelID
+		}
+		return nil, &UpstreamError{
+			HTTPStatus:  http.StatusBadRequest,
+			QoderStatus: http.StatusBadRequest,
+			PublicCode:  "unsupported_image_input",
+			Type:        "invalid_request_error",
+			Message:     fmt.Sprintf("model %q does not support image input", modelName),
+		}
+	}
+
 	policy := c.QueueRetry
 	if policy.MaxRetries < 0 {
 		policy.MaxRetries = 0
@@ -172,8 +194,11 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	if tools == nil {
 		tools = []any{}
 	}
+	messages := req.Messages
+	allImages := messageImageURLs(messages)
+	topLevelImages := latestUserImageURLs(messages)
 	requestSetID := requestSetIDForRequest(req, sessionID)
-	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, req.Messages, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
+	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, messages, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
 	isRetry := attempt > 0
@@ -191,6 +216,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	} else if req.ReasoningEffort != "" {
 		isReasoning = true
 	}
+	isVL := boolField(modelConfig, "is_vl")
 	body := map[string]any{
 		"request_id":       requestID,
 		"request_set_id":   requestSetID,
@@ -207,17 +233,17 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"task_id":          DefaultTask,
 		"code_language":    "",
 		"chat_prompt":      "",
-		"image_urls":       nil,
+		"image_urls":       nullableImageURLs(topLevelImages),
 		"aliyun_user_type": "",
 		"system":           req.System,
-		"messages":         req.Messages,
+		"messages":         messages,
 		"tools":            tools,
 		"parameters":       parameters,
 		"chat_context": map[string]any{
 			"chatPrompt": "", "imageUrls": nil,
 			"extra": map[string]any{
 				"context":         []any{},
-				"modelConfig":     map[string]any{"key": req.ModelID, "is_reasoning": isReasoning},
+				"modelConfig":     map[string]any{"key": req.ModelID, "is_reasoning": isReasoning, "is_vl": isVL},
 				"originalContent": req.LastUserText,
 			},
 			"features": []any{}, "text": req.LastUserText,
@@ -263,6 +289,32 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	// Go's transport fingerprint here for closer protocol parity.
 	httpReq.Header["User-Agent"] = []string{""}
 	started := time.Now()
+	protocolLabel := sourceProtocolLabel(req.SourceProtocol)
+	promptPrefixHash := shortStableHash("qoder-prompt-prefix", req.System, tools)
+	slog.Info("qoder request shape",
+		"protocol", protocolLabel,
+		"model", req.PublicModel,
+		"upstream_model", req.ModelID,
+		"attempt", attempt+1,
+		"client_session_bound", clientSessionBound,
+		"session_id", sessionID,
+		"request_set_id", requestSetID,
+		"chat_record_id", chatRecordID,
+		"body_bytes", len(plainBody),
+		"encoded_body_bytes", len(encodedBody),
+		"messages", len(messages),
+		"messages_json_bytes", jsonSize(messages),
+		"system_bytes", len(req.System),
+		"tools", len(tools),
+		"tools_json_bytes", jsonSize(tools),
+		"images", len(allImages),
+		"image_source_bytes", imageTransportBytes(allImages),
+		"top_level_images", len(topLevelImages),
+		"top_level_image_bytes", imageTransportBytes(topLevelImages),
+		"prompt_prefix_hash", promptPrefixHash,
+		"system_hash", shortStableHash("system", req.System),
+		"tools_hash", shortStableHash("tools", tools),
+	)
 	slog.Debug("qoder request",
 		"operation", "chat",
 		"model", req.PublicModel,
@@ -277,9 +329,16 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"body_bytes", len(plainBody),
 		"encoded_body_bytes", len(encodedBody),
 		"encoded", true,
-		"messages", len(req.Messages),
-		"roles", messageRoles(req.Messages),
+		"messages", len(messages),
+		"roles", messageRoles(messages),
+		"messages_json_bytes", jsonSize(messages),
+		"system_bytes", len(req.System),
+		"tools_json_bytes", jsonSize(tools),
 		"last_user_bytes", len(req.LastUserText),
+		"images", len(allImages),
+		"image_source_bytes", imageTransportBytes(allImages),
+		"top_level_images", len(topLevelImages),
+		"top_level_image_bytes", imageTransportBytes(topLevelImages),
 		"tools", len(tools),
 		"max_tokens", maxTokens,
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
@@ -321,10 +380,136 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		slog.Error("qoder upstream error", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "attempt", attempt+1, "is_retry", isRetry, "client_session_bound", clientSessionBound, "session_id", sessionID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "context_window", effectiveContextWindowLabel(req.ContextWindow), "status", resp.StatusCode, "body", truncateRunes(message, 1000))
 		return nil, fmt.Errorf("qoder chat returned HTTP %d: %s", resp.StatusCode, message)
 	}
-	if c.UsageObserver != nil {
-		resp.Body = observeUsageBody(resp.Body, c.UsageObserver)
-	}
+	resp.Body = observeUsageBody(resp.Body, func(usage protocol.Usage) {
+		uncached := usage.InputTokens - usage.CachedTokens
+		if uncached < 0 {
+			uncached = 0
+		}
+		slog.Info("qoder usage",
+			"protocol", protocolLabel,
+			"model", req.PublicModel,
+			"upstream_model", req.ModelID,
+			"session_id", sessionID,
+			"request_set_id", requestSetID,
+			"chat_record_id", chatRecordID,
+			"prompt_prefix_hash", promptPrefixHash,
+			"input_tokens", usage.InputTokens,
+			"cached_tokens", usage.CachedTokens,
+			"uncached_input_tokens", uncached,
+			"output_tokens", usage.OutputTokens,
+			"total_tokens", usage.TotalTokens,
+		)
+		if c.UsageObserver != nil {
+			c.UsageObserver(usage)
+		}
+	})
 	return resp, nil
+}
+
+func messageImageURLs(messages []map[string]any) []string {
+	var out []string
+	for _, message := range messages {
+		out = append(out, contentImageURLs(message["content"])...)
+	}
+	return out
+}
+
+// latestUserImageURLs returns compatibility attachment metadata for the active
+// input segment only. The canonical messages already retain every historical
+// image. For an initial/user turn this is the user content after the most recent
+// assistant message; for an agent tool round it is the trailing tool/user input
+// after the assistant tool call. This avoids re-sending an older user image as
+// a top-level attachment on every subsequent tool round.
+func latestUserImageURLs(messages []map[string]any) []string {
+	lastAssistant := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		role, _ := messages[i]["role"].(string)
+		if strings.EqualFold(strings.TrimSpace(role), "assistant") {
+			lastAssistant = i
+			break
+		}
+	}
+	out := make([]string, 0)
+	for i := lastAssistant + 1; i < len(messages); i++ {
+		role, _ := messages[i]["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+		if role != "user" && role != "tool" {
+			continue
+		}
+		out = append(out, contentImageURLs(messages[i]["content"])...)
+	}
+	return out
+}
+
+func contentImageURLs(content any) []string {
+	var parts []any
+	switch value := content.(type) {
+	case []any:
+		parts = value
+	case []map[string]any:
+		parts = make([]any, 0, len(value))
+		for _, part := range value {
+			parts = append(parts, part)
+		}
+	default:
+		return nil
+	}
+	out := make([]string, 0)
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if imageURL := contentPartImageURL(part); imageURL != "" {
+			out = append(out, imageURL)
+		}
+	}
+	return out
+}
+
+func contentPartImageURL(part map[string]any) string {
+	if strings.ToLower(strings.TrimSpace(fmt.Sprint(part["type"]))) != "image_url" {
+		return ""
+	}
+	switch image := part["image_url"].(type) {
+	case string:
+		return strings.TrimSpace(image)
+	case map[string]any:
+		if url, _ := image["url"].(string); url != "" {
+			return strings.TrimSpace(url)
+		}
+	}
+	return ""
+}
+
+func nullableImageURLs(imageURLs []string) any {
+	if len(imageURLs) == 0 {
+		return nil
+	}
+	return imageURLs
+}
+
+func jsonSize(value any) int {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return 0
+	}
+	return len(data)
+}
+
+func imageTransportBytes(imageURLs []string) int {
+	total := 0
+	for _, imageURL := range imageURLs {
+		total += len(imageURL)
+	}
+	return total
+}
+
+func sourceProtocolLabel(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "unknown"
+	}
+	return value
 }
 
 // effectiveReasoningLabel makes the upstream automatic behavior explicit instead of leaving logs blank.

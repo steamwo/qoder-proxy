@@ -47,6 +47,56 @@ func TestNormalizeResponsesExposesToolSearchToQoder(t *testing.T) {
 	}
 }
 
+func TestNormalizeResponsesOmitsDeferredNamespaceUntilToolSearchLoadsIt(t *testing.T) {
+	req := ResponsesRequest{
+		Model: "MCP Model",
+		Input: json.RawMessage(`"Search the code graph"`),
+		Tools: []map[string]any{
+			{
+				"type": "tool_search", "execution": "client", "description": "Search deferred tools.",
+				"parameters": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}},
+			},
+			{
+				"type": "namespace", "name": "mcp__codebase-memory-mcp", "defer_loading": true,
+				"description": "Large deferred code graph tool namespace.",
+				"tools": []any{map[string]any{
+					"type": "function", "name": "search_graph", "description": "Search the graph.",
+					"parameters": map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}},
+				}},
+			},
+		},
+	}
+	got, err := NormalizeResponses(req, mcpTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("deferred namespace leaked into Qoder tools: %#v", got.Tools)
+	}
+	fn := got.Tools[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "tool_search" {
+		t.Fatalf("expected only tool_search, got %#v", got.Tools)
+	}
+}
+
+func TestNormalizeResponsesKeepsDeferredToolWithoutToolSearch(t *testing.T) {
+	req := ResponsesRequest{
+		Model: "MCP Model",
+		Input: json.RawMessage(`"Call the tool"`),
+		Tools: []map[string]any{{
+			"type": "function", "name": "expensive_tool", "defer_loading": true,
+			"parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+		}},
+	}
+	got, err := NormalizeResponses(req, mcpTestModel())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("deferred tool became unreachable without tool_search: %#v", got.Tools)
+	}
+}
+
 func TestNormalizeResponsesFlattensMCPNamespaceAndRestoresRoute(t *testing.T) {
 	req := ResponsesRequest{
 		Model: "MCP Model",
@@ -95,8 +145,8 @@ func TestNormalizeResponsesLoadsToolsFromToolSearchOutput(t *testing.T) {
 	input := json.RawMessage(`[
 		{"type":"tool_search_call","id":"ts_item","call_id":"ts_1","execution":"client","arguments":{"query":"code graph"}},
 		{"type":"tool_search_output","call_id":"ts_1","status":"completed","execution":"client","tools":[
-			{"type":"namespace","name":"mcp__codebase-memory-mcp","description":"Code graph tools.","tools":[
-				{"type":"function","name":"get_architecture","description":"Get architecture","parameters":{"type":"object","properties":{}}}
+			{"type":"namespace","name":"mcp__codebase-memory-mcp","description":"Code graph tools.","defer_loading":true,"tools":[
+				{"type":"function","name":"get_architecture","description":"Get architecture","defer_loading":true,"parameters":{"type":"object","properties":{}}}
 			]}
 		]},
 		{"type":"message","role":"user","content":[{"type":"input_text","text":"Use it now"}]}

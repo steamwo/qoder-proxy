@@ -51,6 +51,7 @@ func NormalizeChat(req ChatRequest, model qoder.Model) (protocol.Request, error)
 	}
 	return protocol.Request{
 		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw,
+		SourceProtocol:  "openai_chat",
 		ReasoningEffort: reasoningEffort,
 		System:          system, Messages: messages, Tools: req.Tools, MaxTokens: max,
 		Temperature: req.Temperature, TopP: req.TopP, Stop: req.Stop, LastUserText: lastUser,
@@ -81,10 +82,12 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 			discoveredTools = append(discoveredTools, mapsFromAny(item["tools"])...)
 		}
 	}
-	allTools := make([]map[string]any, 0, len(req.Tools)+len(discoveredTools))
-	allTools = append(allTools, req.Tools...)
-	allTools = append(allTools, discoveredTools...)
-	tools, routes := normalizeResponsesTools(allTools)
+	// Respect client-side deferred tool semantics. Initial tools explicitly
+	// marked defer_loading stay out of Qoder's model-visible tool schemas when a
+	// tool_search entry point exists. Tools returned by tool_search_output or
+	// additional_tools are considered discovered and are therefore included even
+	// if their original declaration still carries defer_loading=true.
+	tools, routes := normalizeResponsesToolSets(req.Tools, discoveredTools)
 
 	var rawMessages []map[string]any
 	var systemParts []string
@@ -102,7 +105,9 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 				rawMessages = append(rawMessages, canonicalToolCallMessage(firstString(item, "call_id", "id"), qoderName, item["arguments"]))
 				continue
 			case "function_call_output":
-				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": valueText(item["output"])})
+				// Keep structured output intact so image content returned by tools is
+				// normalized as multimodal content instead of being JSON-stringified.
+				rawMessages = append(rawMessages, map[string]any{"role": "tool", "tool_call_id": asString(item["call_id"]), "content": item["output"]})
 				continue
 			case "tool_search_call":
 				qoderName := responseToolAlias(routes, "tool_search", "", "tool_search")
@@ -143,7 +148,9 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 	}
 
 	return protocol.Request{
-		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw, ReasoningEffort: reasoningEffort, System: system, Messages: messages, Tools: tools, ToolRoutes: routes,
+		PublicModel: req.Model, ModelID: model.UpstreamID, ModelConfig: model.Raw,
+		SourceProtocol: "openai_responses", ReasoningEffort: reasoningEffort,
+		System: system, Messages: messages, Tools: tools, ToolRoutes: routes,
 		MaxTokens: req.MaxOutputTokens, Temperature: req.Temperature, TopP: req.TopP, LastUserText: lastUser,
 	}, nil
 }
@@ -172,28 +179,43 @@ func argumentsText(v any) string {
 }
 
 func normalizeResponsesTools(input []map[string]any) ([]any, map[string]protocol.ToolRoute) {
-	out := make([]any, 0, len(input))
+	return normalizeResponsesToolSets(input, nil)
+}
+
+func normalizeResponsesToolSets(initial, discovered []map[string]any) ([]any, map[string]protocol.ToolRoute) {
+	out := make([]any, 0, len(initial)+len(discovered))
 	routes := make(map[string]protocol.ToolRoute)
 	usedAliases := make(map[string]string)
 	seenTargets := make(map[string]bool)
+	hasToolSearch := false
 
 	// Reserve tool_search first so a client function coincidentally named
 	// tool_search cannot steal the discoverability entry point used by Codex.
-	for _, tool := range input {
+	for _, tool := range initial {
 		if asString(tool["type"]) == "tool_search" {
-			appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "")
+			hasToolSearch = true
+			appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "", false, false)
 		}
 	}
-	for _, tool := range input {
+	for _, tool := range initial {
 		if asString(tool["type"]) == "tool_search" {
 			continue
 		}
-		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "")
+		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "", hasToolSearch, false)
+	}
+	for _, tool := range discovered {
+		// A discovered tool has already crossed the client's search boundary and
+		// must be callable on this turn even if its source declaration is marked
+		// defer_loading.
+		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "", false, true)
 	}
 	return out, routes
 }
 
-func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedAliases map[string]string, seenTargets map[string]bool, tool map[string]any, namespace, namespaceDescription string) {
+func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedAliases map[string]string, seenTargets map[string]bool, tool map[string]any, namespace, namespaceDescription string, deferEnabled, includeDeferred bool) {
+	if deferEnabled && !includeDeferred && responsesToolDeferred(tool) && asString(tool["type"]) != "tool_search" {
+		return
+	}
 	typ := asString(tool["type"])
 	switch typ {
 	case "namespace":
@@ -203,7 +225,7 @@ func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedA
 		}
 		desc := strings.TrimSpace(asString(tool["description"]))
 		for _, child := range mapsFromAny(tool["tools"]) {
-			appendResponsesTool(out, routes, usedAliases, seenTargets, child, ns, desc)
+			appendResponsesTool(out, routes, usedAliases, seenTargets, child, ns, desc, deferEnabled, includeDeferred)
 		}
 	case "tool_search":
 		key := "tool_search\x00client"
@@ -259,6 +281,11 @@ func appendResponsesTool(out *[]any, routes map[string]protocol.ToolRoute, usedA
 		*out = append(*out, map[string]any{"type": "function", "function": fn})
 		routes[alias] = protocol.ToolRoute{Kind: "function", Name: name, Namespace: namespace}
 	}
+}
+
+func responsesToolDeferred(tool map[string]any) bool {
+	deferred, _ := tool["defer_loading"].(bool)
+	return deferred
 }
 
 func responseToolAlias(routes map[string]protocol.ToolRoute, kind, namespace, name string) string {
@@ -339,6 +366,10 @@ func mapsFromAny(v any) []map[string]any {
 	}
 }
 
+// normalizeMessages keeps multimodal content attached to the message that
+// supplied it. Text-only content remains a string to preserve the compact
+// request shape used by Qoder; messages containing images use canonical
+// OpenAI-style text/image_url content parts.
 func normalizeMessages(input []map[string]any) ([]map[string]any, string, string) {
 	out := make([]map[string]any, 0, len(input))
 	var systemParts []string
@@ -348,7 +379,7 @@ func normalizeMessages(input []map[string]any) ([]map[string]any, string, string
 		if role == "" {
 			role = "user"
 		}
-		text := contentText(raw["content"])
+		content, text := canonicalMessageContent(raw["content"])
 		if role == "system" || role == "developer" {
 			if text != "" {
 				systemParts = append(systemParts, text)
@@ -363,35 +394,99 @@ func normalizeMessages(input []map[string]any) ([]map[string]any, string, string
 			m[k] = v
 		}
 		m["role"] = role
-		m["content"] = text
+		m["content"] = content
 		out = append(out, m)
 	}
 	return out, strings.Join(systemParts, "\n\n"), lastUser
 }
 
-func contentText(v any) string {
+func canonicalMessageContent(v any) (any, string) {
 	if s, ok := v.(string); ok {
-		return s
+		return s, s
 	}
-	arr, ok := v.([]any)
-	if !ok {
-		return valueText(v)
+	if m, ok := v.(map[string]any); ok {
+		if imageURL := imageURLFromPart(m); imageURL != "" {
+			return []any{canonicalImagePart(imageURL)}, ""
+		}
+		if text := firstString(m, "text", "content", "refusal"); text != "" {
+			return text, text
+		}
+		text := valueText(v)
+		return text, text
 	}
-	var parts []string
+	var arr []any
+	switch items := v.(type) {
+	case []any:
+		arr = items
+	case []map[string]any:
+		arr = make([]any, 0, len(items))
+		for _, item := range items {
+			arr = append(arr, item)
+		}
+	default:
+		text := valueText(v)
+		return text, text
+	}
+
+	parts := make([]any, 0, len(arr))
+	textParts := make([]string, 0, len(arr))
+	hasImage := false
 	for _, raw := range arr {
-		switch p := raw.(type) {
+		switch part := raw.(type) {
 		case string:
-			if p != "" {
-				parts = append(parts, p)
+			if part != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": part})
+				textParts = append(textParts, part)
 			}
 		case map[string]any:
-			if s := firstString(p, "text", "content"); s != "" {
-				parts = append(parts, s)
+			if imageURL := imageURLFromPart(part); imageURL != "" {
+				hasImage = true
+				parts = append(parts, canonicalImagePart(imageURL))
+				continue
+			}
+			if text := firstString(part, "text", "content", "refusal"); text != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": text})
+				textParts = append(textParts, text)
 			}
 		}
 	}
-	return strings.Join(parts, "\n")
+	text := strings.Join(textParts, "\n")
+	if !hasImage {
+		return text, text
+	}
+	return parts, text
 }
+
+func canonicalImagePart(imageURL string) map[string]any {
+	return map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": strings.TrimSpace(imageURL),
+		},
+	}
+}
+
+func contentText(v any) string {
+	_, text := canonicalMessageContent(v)
+	return text
+}
+
+func imageURLFromPart(part map[string]any) string {
+	typ := strings.ToLower(strings.TrimSpace(asString(part["type"])))
+	if typ != "image_url" && typ != "input_image" && typ != "image" {
+		return ""
+	}
+	if value := part["image_url"]; value != nil {
+		switch image := value.(type) {
+		case string:
+			return strings.TrimSpace(image)
+		case map[string]any:
+			return strings.TrimSpace(asString(image["url"]))
+		}
+	}
+	return strings.TrimSpace(firstString(part, "url", "image_url"))
+}
+
 func valueText(v any) string {
 	if s, ok := v.(string); ok {
 		return s

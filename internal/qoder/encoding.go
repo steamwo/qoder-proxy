@@ -20,8 +20,12 @@ var qoderS2C = func() [128]int16 {
 }()
 
 // qoderEncodeBody applies Qoder's body obfuscation used with &Encode=1.
-// The encoded bytes, not the plaintext JSON, must be used for COSY signing.
+// Before encoding, project the official CLI-style structured contents/cache
+// marker metadata so stable system/tools/message prefixes are eligible for
+// Qoder prompt-cache reuse. The encoded bytes, not the plaintext JSON, must be
+// used for COSY signing.
 func qoderEncodeBody(plaintext []byte) []byte {
+	plaintext = addQoderPromptCacheMetadata(plaintext)
 	std := base64.StdEncoding.EncodeToString(plaintext)
 	n := len(std)
 	a := n / 3

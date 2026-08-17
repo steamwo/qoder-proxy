@@ -15,6 +15,10 @@ type Request struct {
 	PublicModel string
 	ModelID     string
 	ModelConfig map[string]any
+	// SourceProtocol identifies the downstream compatibility surface that
+	// normalized this request. It is diagnostic metadata only and is never sent
+	// to Qoder. Known values include anthropic, openai_chat, and openai_responses.
+	SourceProtocol string
 	// ReasoningEffort is the per-request Qoder thinking-depth override.
 	// Empty means use the model/account default. Supported values are validated
 	// against the selected model's thinking_config before reaching the client.
@@ -23,8 +27,12 @@ type Request struct {
 	// Zero means use Qoder's automatic/default behavior.
 	ContextWindow int
 	System        string
-	Messages      []map[string]any
-	Tools         []any
+	// Messages is the canonical conversation representation used by every
+	// downstream adapter. Multimodal content stays attached to its original
+	// message as OpenAI-style content parts (text/image_url); Qoder-specific
+	// compatibility fields are derived from these messages at the final hop.
+	Messages []map[string]any
+	Tools    []any
 	// ToolRoutes maps Qoder-visible function names back to downstream protocol
 	// tool identities. It lets the Responses adapter flatten namespace/tool_search
 	// tools for Qoder without losing the client-visible tool kind or namespace.
