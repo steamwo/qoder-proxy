@@ -109,13 +109,23 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists" >&2
+            echo "Release $RELEASE_TAG already exists; refusing to overwrite an existing release" >&2
             exit 1
           fi
 
           if [[ "$RELEASE_SOURCE" == "tag" ]]; then
             gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --draft --generate-notes --verify-tag
           else
+            # An explicit release commit on main is allowed to repair a stale
+            # lightweight tag when no GitHub Release exists yet. This keeps a
+            # previously published release immutable while allowing abandoned
+            # pre-release tags to be reused deliberately.
+            if gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+              gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" \
+                -f sha="$GITHUB_SHA" \
+                -F force=true >/dev/null
+              echo "Retargeted stale tag ${RELEASE_TAG} to ${GITHUB_SHA}"
+            fi
             gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --generate-notes
           fi
 
