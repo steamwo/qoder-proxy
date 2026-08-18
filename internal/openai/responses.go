@@ -35,7 +35,7 @@ func HandleResponses(w http.ResponseWriter, r *http.Request, backend Backend) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	resp, err := backend.Chat(r.Context(), preq)
+	resp, preq, priorUsage, err := chatResponsesWithToolDiscovery(r.Context(), backend, req, preq)
 	if err != nil {
 		writeBackendError(w, err, http.StatusBadGateway)
 		return
@@ -43,7 +43,7 @@ func HandleResponses(w http.ResponseWriter, r *http.Request, backend Backend) {
 	defer resp.Body.Close()
 
 	if req.Stream {
-		streamResponses(w, resp, req, preq.ToolRoutes)
+		streamResponses(w, resp, req, preq.ToolRoutes, priorUsage)
 		return
 	}
 	a, err := collectEvents(resp)
@@ -51,6 +51,7 @@ func HandleResponses(w http.ResponseWriter, r *http.Request, backend Backend) {
 		writeError(w, http.StatusBadGateway, "upstream_stream_error", err.Error())
 		return
 	}
+	a.Usage = addProtocolUsage(priorUsage, a.Usage)
 	state := newResponseState(req, preq.ToolRoutes)
 	state.applyAggregate(a)
 	writeJSON(w, http.StatusOK, state.responseObject("completed"))
@@ -275,7 +276,7 @@ func (s *responseState) applyAggregate(a *aggregate) {
 	s.Usage = a.Usage
 }
 
-func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRequest, routes map[string]protocol.ToolRoute) {
+func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRequest, routes map[string]protocol.ToolRoute, priorUsage protocol.Usage) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "HTTP streaming unsupported")
@@ -287,6 +288,7 @@ func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRe
 	w.WriteHeader(http.StatusOK)
 
 	s := newResponseState(req, routes)
+	s.Usage = priorUsage
 	meaningfulEvents := 0
 	emit := func(typ string, payload map[string]any) {
 		payload["type"] = typ
@@ -364,7 +366,7 @@ func streamResponses(w http.ResponseWriter, resp *http.Response, req ResponsesRe
 			}
 
 		case protocol.EventUsage:
-			s.Usage = ev.Usage
+			s.Usage = addProtocolUsage(priorUsage, ev.Usage)
 		case protocol.EventError:
 			emit("error", map[string]any{
 				"code":    "QODER_STREAM_ERROR",
