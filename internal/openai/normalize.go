@@ -82,12 +82,14 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 			discoveredTools = append(discoveredTools, mapsFromAny(item["tools"])...)
 		}
 	}
-	// Respect client-side deferred tool semantics. Initial tools explicitly
-	// marked defer_loading stay out of Qoder's model-visible tool schemas when a
-	// tool_search entry point exists. Tools returned by tool_search_output or
-	// additional_tools are considered discovered and are therefore included even
-	// if their original declaration still carries defer_loading=true.
-	tools, routes := normalizeResponsesToolSets(req.Tools, discoveredTools)
+	// Respect client-side deferred tool semantics. For very large Codex tool
+	// registries that do not provide tool_search themselves, the experimental
+	// virtualization layer injects a client-executed tool_search and marks the
+	// long tail deferred before the normal Qoder projection runs. The original
+	// downstream request is not mutated, and discovered tools are still promoted
+	// here on subsequent turns.
+	effectiveInitial := autoVirtualizeResponsesTools(req.Tools)
+	tools, routes := normalizeResponsesToolSets(effectiveInitial, discoveredTools)
 
 	var rawMessages []map[string]any
 	var systemParts []string
@@ -205,8 +207,8 @@ func normalizeResponsesToolSets(initial, discovered []map[string]any) ([]any, ma
 	}
 	for _, tool := range discovered {
 		// A discovered tool has already crossed the client's search boundary and
-		// must be callable on this turn even if its source declaration is marked
-		// defer_loading.
+		// must be callable on this turn even if its source declaration still carries
+		// defer_loading=true.
 		appendResponsesTool(&out, routes, usedAliases, seenTargets, tool, "", "", false, true)
 	}
 	return out, routes
