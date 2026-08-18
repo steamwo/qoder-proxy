@@ -37,6 +37,7 @@ type ResponsesRequest struct {
 	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
 	Reasoning       map[string]any   `json:"reasoning,omitempty"`
 	Metadata        map[string]any   `json:"metadata,omitempty"`
+	PromptCacheKey  string           `json:"prompt_cache_key,omitempty"`
 }
 
 func NormalizeChat(req ChatRequest, model qoder.Model) (protocol.Request, error) {
@@ -154,6 +155,7 @@ func NormalizeResponses(req ResponsesRequest, model qoder.Model) (protocol.Reque
 		SourceProtocol: "openai_responses", ReasoningEffort: reasoningEffort,
 		System: system, Messages: messages, Tools: tools, ToolRoutes: routes,
 		MaxTokens: req.MaxOutputTokens, Temperature: req.Temperature, TopP: req.TopP, LastUserText: lastUser,
+		ClientSessionKey: responsesPromptCacheSessionKey(req.PromptCacheKey),
 	}, nil
 }
 
