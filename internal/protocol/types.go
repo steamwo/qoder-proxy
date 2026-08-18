@@ -42,10 +42,15 @@ type Request struct {
 	TopP             *float64
 	Stop             any
 	LastUserText     string
-	// ClientSessionKey identifies the current client-side conversation or agent.
-	// It is never forwarded verbatim; Qoder derives a stable opaque session ID
-	// from it. Empty means no trustworthy client session identifier was supplied.
+	// ClientSessionKey identifies the current downstream conversation/thread or
+	// agent. It is never forwarded verbatim; Qoder derives a stable opaque
+	// session ID from it. Empty means no trustworthy downstream conversation
+	// identifier was supplied.
 	ClientSessionKey string
+	// ClientTurnKey identifies one downstream user/agent turn inside the current
+	// conversation. When supplied, Qoder request_set_id is derived from this key
+	// instead of inferring a turn boundary from message history.
+	ClientTurnKey string
 	// ClaudeToolCompatibility enables the Claude Code-specific Qoder tool
 	// namespace reminder and response guard. OpenAI protocol adapters
 	// intentionally leave this false so Claude ToolSearch behavior cannot leak

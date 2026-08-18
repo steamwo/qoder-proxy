@@ -7,15 +7,13 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/protocol"
 )
 
-// sessionIDForRequest preserves a trustworthy client conversation/agent across
-// turns while keeping the upstream identifier opaque. The Qoder model remains
-// part of the namespace, matching the provider's routing/cache affinity while
-// adding the missing client-conversation isolation. The authenticated Qoder
-// account already scopes the upstream request. Requests without a client-
-// provided session key are isolated with a fresh random UUID.
+// sessionIDForRequest preserves one trustworthy downstream conversation/thread
+// across turns and model switches while keeping the upstream identifier opaque.
+// The downstream key is already protocol-namespaced by the server. Requests
+// without a trustworthy client conversation key are isolated with a fresh UUID.
 func sessionIDForRequest(req protocol.Request) (string, error) {
 	if key := strings.TrimSpace(req.ClientSessionKey); key != "" {
-		return stableHash("qoder-client-session", req.ModelID, key), nil
+		return stableHash("qoder-client-session", key), nil
 	}
 	id, err := randomUUID()
 	if err != nil {

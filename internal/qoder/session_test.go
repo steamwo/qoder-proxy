@@ -97,3 +97,31 @@ func TestChatWithQueueReusesQoderSessionAcrossRetries(t *testing.T) {
 		t.Fatalf("queue retry must reuse one Qoder session, got %#v", sessions)
 	}
 }
+
+func TestClientConversationSessionStableAcrossModelSwitch(t *testing.T) {
+	first, err := sessionIDForRequest(protocol.Request{ModelID: "lite", ClientSessionKey: "codex/thread/thread-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionIDForRequest(protocol.Request{ModelID: "pro", ClientSessionKey: "codex/thread/thread-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("same downstream conversation changed Qoder session across model switch: %q != %q", first, second)
+	}
+}
+
+func TestDistinctClientConversationsUseDistinctQoderSessions(t *testing.T) {
+	first, err := sessionIDForRequest(protocol.Request{ClientSessionKey: "codex/thread/thread-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionIDForRequest(protocol.Request{ClientSessionKey: "codex/thread/thread-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("distinct downstream conversations reused Qoder session %q", first)
+	}
+}

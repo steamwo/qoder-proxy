@@ -6,14 +6,15 @@ import (
 	"github.com/steamwo/qoder-proxy/internal/protocol"
 )
 
-// requestSetIDForRequest maps one downstream user task to one Qoder request set.
-// Client-side agent loops append assistant/tool messages after the latest real
-// user turn, so hashing only the conversation prefix through that user turn
-// keeps request_set_id stable across tool round-trips while a subsequent user
-// instruction naturally starts a new request set. Multimodal content is already
-// part of each canonical message, so image identity follows the same boundary
-// instead of being hashed through a request-global side channel.
+// requestSetIDForRequest maps one downstream user/agent turn to one Qoder
+// request set. Prefer a trustworthy downstream turn ID when the client exposes
+// one (for example Codex x-codex-turn-metadata.turn_id). Otherwise fall back to
+// the canonical message prefix through the latest meaningful user message so
+// generic OpenAI and Claude clients preserve the previous behavior.
 func requestSetIDForRequest(req protocol.Request, sessionID string) string {
+	if key := strings.TrimSpace(req.ClientTurnKey); key != "" {
+		return stableHash("qoder-client-turn", sessionID, key)
+	}
 	return stableHash("qoder-request-set", sessionID, req.ModelID, req.ContextWindow, requestSetMessagePrefix(req.Messages))
 }
 

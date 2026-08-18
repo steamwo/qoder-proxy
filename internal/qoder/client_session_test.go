@@ -35,7 +35,7 @@ func TestSessionIDForRequestSeparatesSubagents(t *testing.T) {
 	}
 }
 
-func TestSessionIDForRequestSeparatesModelsWithinClientSession(t *testing.T) {
+func TestSessionIDForRequestPreservesConversationAcrossModels(t *testing.T) {
 	first, err := sessionIDForRequest(protocol.Request{ModelID: "model-a", ClientSessionKey: "codex/thread/t1"})
 	if err != nil {
 		t.Fatal(err)
@@ -44,8 +44,8 @@ func TestSessionIDForRequestSeparatesModelsWithinClientSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first == second {
-		t.Fatalf("different Qoder models shared session %q", first)
+	if first != second {
+		t.Fatalf("same downstream conversation changed Qoder session across models: %q vs %q", first, second)
 	}
 }
 
