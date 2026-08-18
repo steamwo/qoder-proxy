@@ -79,6 +79,9 @@ func bindClientSession(ctx context.Context, req protocol.Request) protocol.Reque
 	if key := clientSessionKeyFromContext(ctx); key != "" {
 		req.ClientSessionKey = key
 	}
+	if key := clientTurnKeyFromContext(ctx); key != "" {
+		req.ClientTurnKey = key
+	}
 	return req
 }
 

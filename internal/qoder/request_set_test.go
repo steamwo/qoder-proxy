@@ -91,6 +91,37 @@ func TestRequestSetIDChangesWithExplicitContextWindow(t *testing.T) {
 	}
 }
 
+func TestRequestSetIDUsesDownstreamTurnAcrossToolHistoryAndModelSwitch(t *testing.T) {
+	sessionID := "session-1"
+	initial := protocol.Request{
+		ModelID:       "lite",
+		ClientTurnKey: "codex/turn/turn-42",
+		Messages:      []map[string]any{{"role": "user", "content": "fix it"}},
+	}
+	continued := protocol.Request{
+		ModelID:       "pro",
+		ContextWindow: 1000000,
+		ClientTurnKey: "codex/turn/turn-42",
+		Messages: []map[string]any{
+			{"role": "user", "content": "fix it"},
+			{"role": "assistant", "content": "", "tool_calls": []any{map[string]any{"id": "call-1", "type": "function", "function": map[string]any{"name": "Bash", "arguments": `{}`}}}},
+			{"role": "tool", "tool_call_id": "call-1", "content": "done"},
+		},
+	}
+	if first, second := requestSetIDForRequest(initial, sessionID), requestSetIDForRequest(continued, sessionID); first != second {
+		t.Fatalf("same downstream turn changed request_set_id: %s != %s", first, second)
+	}
+}
+
+func TestRequestSetIDChangesForDistinctDownstreamTurns(t *testing.T) {
+	sessionID := "session-1"
+	first := protocol.Request{ClientTurnKey: "codex/turn/turn-1"}
+	second := protocol.Request{ClientTurnKey: "codex/turn/turn-2"}
+	if requestSetIDForRequest(first, sessionID) == requestSetIDForRequest(second, sessionID) {
+		t.Fatal("distinct downstream turns reused request_set_id")
+	}
+}
+
 func TestRequestSetPrefixIgnoresEmptySyntheticUserMessage(t *testing.T) {
 	messages := []map[string]any{
 		{"role": "user", "content": "task"},
