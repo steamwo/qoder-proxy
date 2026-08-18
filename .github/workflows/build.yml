@@ -146,6 +146,17 @@ jobs:
         shell: pwsh
         run: go build -trimpath -ldflags="-H=windowsgui -s -w" -o dist/qoder-proxy-service-windows-amd64.exe ./cmd/qoder-proxy-service
 
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-windows-${{ github.sha }}
+          path: |
+            dist/qoder-proxy-desktop-windows-amd64.exe
+            dist/qoder-proxy-headless-windows-amd64.exe
+            dist/qoder-proxy-service-windows-amd64.exe
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Upload Windows binaries to draft release
         if: needs.release-context.outputs.is_release == 'true'
         env:
@@ -191,6 +202,16 @@ jobs:
 
       - name: Build Linux lightweight service executable
         run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-service-linux-amd64 ./cmd/qoder-proxy-service
+
+      - name: Upload Linux build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-linux-${{ github.sha }}
+          path: |
+            dist/qoder-proxy-desktop-linux-amd64
+            dist/qoder-proxy-service-linux-amd64
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Upload Linux binaries to draft release
         if: needs.release-context.outputs.is_release == 'true'
