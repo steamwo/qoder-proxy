@@ -64,6 +64,7 @@ jobs:
     outputs:
       is_release: ${{ steps.detect.outputs.is_release }}
       tag: ${{ steps.detect.outputs.tag }}
+      pr_tag: ${{ steps.pr-build.outputs.pr_tag }}
     steps:
       - name: Detect release tag
         id: detect
@@ -118,6 +119,27 @@ jobs:
             gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --generate-notes
           fi
 
+      - name: Prepare PR build release
+        id: pr-build
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_tag="pr-${PR_NUMBER}-build"
+          if gh release view "$pr_tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$pr_tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          fi
+          gh release create "$pr_tag" -R "$GITHUB_REPOSITORY" \
+            --target "$PR_HEAD_SHA" \
+            --draft \
+            --title "PR #${PR_NUMBER} build" \
+            --notes "Temporary CI build assets for PR #${PR_NUMBER} (${PR_HEAD_SHA})."
+          echo "pr_tag=$pr_tag" >> "$GITHUB_OUTPUT"
+
   windows:
     name: Build Windows server and headless
     runs-on: windows-latest
@@ -142,15 +164,17 @@ jobs:
         shell: pwsh
         run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-windows-amd64.exe ./cmd/qoder-proxy
 
-      - name: Upload Windows build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: qoder-proxy-windows-${{ github.sha }}
-          path: |
-            dist/qoder-proxy-web-windows-amd64.exe
-            dist/qoder-proxy-headless-windows-amd64.exe
-          if-no-files-found: error
-          retention-days: 1
+      - name: Upload Windows binaries to PR build release
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BUILD_TAG: ${{ needs.release-context.outputs.pr_tag }}
+        shell: pwsh
+        run: |
+          gh release upload "$env:PR_BUILD_TAG" -R "$env:GITHUB_REPOSITORY" `
+            dist/qoder-proxy-web-windows-amd64.exe `
+            dist/qoder-proxy-headless-windows-amd64.exe `
+            --clobber
 
       - name: Upload Windows binaries to draft release
         if: needs.release-context.outputs.is_release == 'true'
@@ -186,15 +210,16 @@ jobs:
       - name: Build Headless executable
         run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-linux-amd64 ./cmd/qoder-proxy
 
-      - name: Upload Linux build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: qoder-proxy-linux-${{ github.sha }}
-          path: |
-            dist/qoder-proxy-web-linux-amd64
-            dist/qoder-proxy-headless-linux-amd64
-          if-no-files-found: error
-          retention-days: 1
+      - name: Upload Linux binaries to PR build release
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BUILD_TAG: ${{ needs.release-context.outputs.pr_tag }}
+        run: |
+          gh release upload "$PR_BUILD_TAG" -R "$GITHUB_REPOSITORY" \
+            dist/qoder-proxy-web-linux-amd64 \
+            dist/qoder-proxy-headless-linux-amd64 \
+            --clobber
 
       - name: Upload Linux binaries to draft release
         if: needs.release-context.outputs.is_release == 'true'
