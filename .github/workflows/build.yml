@@ -79,7 +79,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             tag="$GITHUB_REF_NAME"
             source="tag"
-          elif [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/heads/main ]]; then
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
             first_line="${HEAD_MESSAGE%%$'\n'*}"
             if [[ "$first_line" == release:\ v* ]]; then
               tag="${first_line#release: }"
