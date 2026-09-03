@@ -3,8 +3,10 @@ package qoder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +15,12 @@ import (
 )
 
 const QuotaURL = "https://openapi.qoder.sh/api/v2/quota/usage"
+
+const (
+	quotaMaxAttempts         = 2
+	quotaRetryDelay          = 250 * time.Millisecond
+	quotaTLSHandshakeTimeout = 5 * time.Second
+)
 
 type QuotaWindow struct {
 	Label            string
@@ -32,18 +40,31 @@ type QuotaSnapshot struct {
 }
 
 func FetchQuota(ctx context.Context, client *http.Client, cred credential.Credential) (QuotaSnapshot, error) {
-	if client == nil {
-		client = http.DefaultClient
+	client = quotaHTTPClient(client)
+
+	var resp *http.Response
+	var err error
+	for attempt := 0; attempt < quotaMaxAttempts; attempt++ {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, QuotaURL, nil)
+		if reqErr != nil {
+			return QuotaSnapshot{}, reqErr
+		}
+		req.Header.Set("Authorization", "Bearer "+cred.Token)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "qoder-proxy/0.3.3-desktop-ui")
+
+		resp, err = client.Do(req)
+		if err == nil {
+			break
+		}
+		if !shouldRetryQuotaRequest(ctx, err) || attempt+1 >= quotaMaxAttempts {
+			return QuotaSnapshot{}, err
+		}
+		if err := waitQuotaRetry(ctx); err != nil {
+			return QuotaSnapshot{}, err
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, QuotaURL, nil)
-	if err != nil {
-		return QuotaSnapshot{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+cred.Token)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "qoder-proxy/0.3.3-desktop-ui")
-	resp, err := client.Do(req)
-	if err != nil {
+	if resp == nil {
 		return QuotaSnapshot{}, err
 	}
 	defer resp.Body.Close()
@@ -64,6 +85,47 @@ func FetchQuota(ctx context.Context, client *http.Client, cred credential.Creden
 		return QuotaSnapshot{}, fmt.Errorf("qoder quota payload did not contain recognizable quota fields")
 	}
 	return snapshot, nil
+}
+
+// quotaHTTPClient keeps quota-specific TLS tuning isolated from the shared
+// proxy/chat client. When callers use Go's default transport, each TLS attempt
+// gets a shorter handshake budget so the existing admin request timeout still
+// has room for one transient retry. Custom transports are left untouched.
+func quotaHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	if client.Transport != nil && client.Transport != http.DefaultTransport {
+		return client
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return client
+	}
+	transport := base.Clone()
+	transport.TLSHandshakeTimeout = quotaTLSHandshakeTimeout
+	copyClient := *client
+	copyClient.Transport = transport
+	return &copyClient
+}
+
+func shouldRetryQuotaRequest(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
+}
+
+func waitQuotaRetry(ctx context.Context) error {
+	timer := time.NewTimer(quotaRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func ParseQuota(payload map[string]any) QuotaSnapshot {
