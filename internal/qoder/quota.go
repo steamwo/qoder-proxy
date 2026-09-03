@@ -17,8 +17,9 @@ import (
 const QuotaURL = "https://openapi.qoder.sh/api/v2/quota/usage"
 
 const (
-	quotaMaxAttempts = 2
-	quotaRetryDelay  = 250 * time.Millisecond
+	quotaMaxAttempts         = 2
+	quotaRetryDelay          = 250 * time.Millisecond
+	quotaTLSHandshakeTimeout = 5 * time.Second
 )
 
 type QuotaWindow struct {
@@ -39,9 +40,7 @@ type QuotaSnapshot struct {
 }
 
 func FetchQuota(ctx context.Context, client *http.Client, cred credential.Credential) (QuotaSnapshot, error) {
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client = quotaHTTPClient(client)
 
 	var resp *http.Response
 	var err error
@@ -86,6 +85,28 @@ func FetchQuota(ctx context.Context, client *http.Client, cred credential.Creden
 		return QuotaSnapshot{}, fmt.Errorf("qoder quota payload did not contain recognizable quota fields")
 	}
 	return snapshot, nil
+}
+
+// quotaHTTPClient keeps quota-specific TLS tuning isolated from the shared
+// proxy/chat client. When callers use Go's default transport, each TLS attempt
+// gets a shorter handshake budget so the existing admin request timeout still
+// has room for one transient retry. Custom transports are left untouched.
+func quotaHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	if client.Transport != nil && client.Transport != http.DefaultTransport {
+		return client
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return client
+	}
+	transport := base.Clone()
+	transport.TLSHandshakeTimeout = quotaTLSHandshakeTimeout
+	copyClient := *client
+	copyClient.Transport = transport
+	return &copyClient
 }
 
 func shouldRetryQuotaRequest(ctx context.Context, err error) bool {
