@@ -79,7 +79,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             tag="$GITHUB_REF_NAME"
             source="tag"
-          elif [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/heads/main ]]; then
             first_line="${HEAD_MESSAGE%%$'\n'*}"
             if [[ "$first_line" == release:\ v* ]]; then
               tag="${first_line#release: }"
@@ -179,6 +179,17 @@ jobs:
         shell: pwsh
         run: ./scripts/build-desktop.ps1
 
+      - name: Upload Windows PR workflow artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-pr-windows-amd64
+          path: |
+            dist/qoder-proxy-web-windows-amd64.exe
+            dist/qoder-proxy-headless-windows-amd64.exe
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Upload Windows binaries to PR build release
         if: github.event_name == 'pull_request'
         env:
@@ -241,6 +252,17 @@ jobs:
       - name: Build Desktop executable for release
         if: needs.release-context.outputs.is_release == 'true'
         run: ./scripts/build-desktop.sh
+
+      - name: Upload Linux PR workflow artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: qoder-proxy-pr-linux-amd64
+          path: |
+            dist/qoder-proxy-web-linux-amd64
+            dist/qoder-proxy-headless-linux-amd64
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Upload Linux binaries to PR build release
         if: github.event_name == 'pull_request'
