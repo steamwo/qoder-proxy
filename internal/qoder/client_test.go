@@ -89,6 +89,9 @@ func TestChatSendsEmptyToolsArrayWhenOmitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+	if custom, exists := body["custom_model"]; !exists || custom != nil {
+		t.Fatalf("custom_model must be present as null, got %#v (exists=%v)", custom, exists)
+	}
 	tools, ok := body["tools"].([]any)
 	if !ok {
 		t.Fatalf("tools must be JSON array, got %#v", body["tools"])
@@ -274,6 +277,9 @@ func TestChatReusesCosyRuntimeKeyAndDefaultsToVerifiedEndpoint(t *testing.T) {
 	var keys []string
 	var hosts []string
 	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Accept-Encoding"); got != "" {
+			t.Fatalf("inference request leaked Accept-Encoding=%q", got)
+		}
 		keys = append(keys, r.Header.Get("Cosy-Key"))
 		hosts = append(hosts, r.URL.Host)
 		return &http.Response{
@@ -333,5 +339,81 @@ func TestChatUsesSnakeCaseContextLength(t *testing.T) {
 	}
 	if _, exists := params["contextWindow"]; exists {
 		t.Fatalf("legacy contextWindow leaked into payload: %#v", params)
+	}
+}
+
+
+func TestChatRetriesInitial401AfterForceRefresh(t *testing.T) {
+	var inferBodies []string
+	var authorizations []string
+	var refreshCalls int
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/v1/deviceToken/refresh":
+			refreshCalls++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"device_token":"new-token","refresh_token":"new-refresh","expires_in":7200}`)),
+				Request:    r,
+			}, nil
+		case "/api/v1/userinfo":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"u1","organization_id":"org-1","organization_tags":["team"],"data_policy_agreed":true}`)),
+				Request:    r,
+			}, nil
+		case "/algo/api/v2/service/pro/sse/agent_chat_generation":
+			if got := r.Header.Get("Accept-Encoding"); got != "" {
+				t.Fatalf("inference request leaked Accept-Encoding=%q", got)
+			}
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inferBodies = append(inferBodies, string(raw))
+			authorizations = append(authorizations, r.Header.Get("Authorization"))
+			if len(inferBodies) == 1 {
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Header:     http.Header{"Content-Type": []string{"text/plain"}},
+					Body:       io.NopCloser(strings.NewReader("expired")),
+					Request:    r,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+				Request:    r,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+			return nil, nil
+		}
+	})}
+	c := NewClient(hc, credential.Credential{
+		Token: "old-token", RefreshToken: "old-refresh", UserID: "u1", MachineID: "m1",
+		RuntimeProfileVersion: currentRuntimeProfileVersion,
+		ExpiresAt:             time.Now().Add(2 * time.Hour).Unix(),
+	})
+	resp, err := c.Chat(context.Background(), protocol.Request{
+		PublicModel: "Display", ModelID: "model-id",
+		ModelConfig: map[string]any{"key": "model-id", "source": "system", "max_output_tokens": 1024},
+		Messages: []map[string]any{{"role": "user", "content": "hello"}}, LastUserText: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if refreshCalls != 1 || len(inferBodies) != 2 {
+		t.Fatalf("refresh=%d inference attempts=%d", refreshCalls, len(inferBodies))
+	}
+	if inferBodies[0] != inferBodies[1] {
+		t.Fatal("401 retry changed encoded RemoteChatAsk body")
+	}
+	if authorizations[0] == "" || authorizations[0] == authorizations[1] {
+		t.Fatalf("authorization was not rebuilt after refresh")
 	}
 }
