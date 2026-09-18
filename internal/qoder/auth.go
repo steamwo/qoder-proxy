@@ -175,6 +175,51 @@ func firstExpiry(m map[string]any, absoluteKeys, durationKeys []string) int64 {
 	return 0
 }
 
+const currentRuntimeProfileVersion = 1
+
+func applyUserInfoProfile(cred credential.Credential, userInfo map[string]any) credential.Credential {
+	if value := firstString(userInfo, "id", "user_id", "userId"); value != "" {
+		cred.UserID = value
+	}
+	if value := firstString(userInfo, "name", "username"); value != "" {
+		cred.Name = value
+	}
+	if value := firstString(userInfo, "email"); value != "" {
+		cred.Email = value
+	}
+	if value := firstString(userInfo, "organization_id", "organizationId"); value != "" {
+		cred.OrganizationID = value
+	}
+	if tags := firstStringSlice(userInfo, "organization_tags", "organizationTags"); tags != nil {
+		cred.OrganizationTags = tags
+	} else if cred.OrganizationTags == nil {
+		cred.OrganizationTags = []string{}
+	}
+	if value, ok := firstBoolPresent(userInfo, "data_policy_agreed", "dataPolicyAgreed"); ok {
+		cred.DataPolicyAgreed = value
+	}
+	if value := firstString(userInfo, "member_id", "memberId"); value != "" {
+		cred.MemberID = value
+	}
+	cred.RuntimeProfileVersion = currentRuntimeProfileVersion
+	return cred
+}
+
+func enrichCredentialProfile(ctx context.Context, client *http.Client, cred credential.Credential) (credential.Credential, error) {
+	userInfo, err := fetchUserInfo(ctx, client, cred.Token)
+	if err != nil {
+		return cred, err
+	}
+	next := applyUserInfoProfile(cred, userInfo)
+	next.EncryptUserInfo = ""
+	next.CosyKey = ""
+	next, err = EnsureRuntimeAuthFields(next)
+	if err != nil {
+		return cred, err
+	}
+	return next, nil
+}
+
 func PollLogin(ctx context.Context, client *http.Client, session LoginSession) (credential.Credential, error) {
 	if client == nil {
 		client = http.DefaultClient
@@ -231,7 +276,7 @@ func pollLoginOnce(ctx context.Context, client *http.Client, session LoginSessio
 	if token == "" {
 		return credential.Credential{}, false, fmt.Errorf("qoder login response is missing token")
 	}
-	userInfo, _ := fetchUserInfo(ctx, client, token)
+	userInfo, userInfoErr := fetchUserInfo(ctx, client, token)
 	userID := firstString(root, "user_id", "userId")
 	if userID == "" {
 		userID = firstString(userInfo, "id", "user_id", "userId")
@@ -254,18 +299,15 @@ func pollLoginOnce(ctx context.Context, client *http.Client, session LoginSessio
 		RefreshTokenExpiresAt: firstExpiry(root, []string{"refresh_token_expires_at", "refresh_token_expire_time"}, []string{"refresh_token_expires_in"}),
 		UserID:                userID,
 		MachineID:             session.MachineID,
-		Name:                  firstString(userInfo, "name", "username"),
-		Email:                 firstString(userInfo, "email"),
-		OrganizationID:        firstString(userInfo, "organization_id", "organizationId"),
-		OrganizationTags:      firstStringSlice(userInfo, "organization_tags", "organizationTags"),
-		DataPolicyAgreed:      firstBool(userInfo, "data_policy_agreed", "dataPolicyAgreed"),
-		MemberID:              firstString(userInfo, "member_id", "memberId"),
 		ExpiresAt:             expiresAt,
 		CreatedAt:             time.Now().Unix(),
 	}
-	cred, err = EnsureRuntimeAuthFields(cred)
-	if err != nil {
-		return credential.Credential{}, false, fmt.Errorf("prepare qoder runtime authentication: %w", err)
+	if userInfoErr == nil {
+		cred = applyUserInfoProfile(cred, userInfo)
+		cred, err = EnsureRuntimeAuthFields(cred)
+		if err != nil {
+			return credential.Credential{}, false, fmt.Errorf("prepare qoder runtime authentication: %w", err)
+		}
 	}
 	return cred, false, nil
 }
@@ -345,42 +387,40 @@ func RefreshCredential(ctx context.Context, client *http.Client, cred credential
 		next.RefreshTokenExpiresAt = refreshExpiresAt
 	}
 	if userInfo, userErr := fetchUserInfo(ctx, client, token); userErr == nil {
-		if value := firstString(userInfo, "id", "user_id", "userId"); value != "" {
-			next.UserID = value
-		}
-		if value := firstString(userInfo, "name", "username"); value != "" {
-			next.Name = value
-		}
-		if value := firstString(userInfo, "email"); value != "" {
-			next.Email = value
-		}
-		if value := firstString(userInfo, "organization_id", "organizationId"); value != "" {
-			next.OrganizationID = value
-		}
-		if tags := firstStringSlice(userInfo, "organization_tags", "organizationTags"); tags != nil {
-			next.OrganizationTags = tags
-		}
-		if value, ok := firstBoolPresent(userInfo, "data_policy_agreed", "dataPolicyAgreed"); ok {
-			next.DataPolicyAgreed = value
-		}
+		next = applyUserInfoProfile(next, userInfo)
 	}
 	next.EncryptUserInfo = ""
 	next.CosyKey = ""
-	next, err = EnsureRuntimeAuthFields(next)
-	if err != nil {
-		return cred, fmt.Errorf("rebuild qoder runtime authentication: %w", err)
+	if next.RuntimeProfileVersion >= currentRuntimeProfileVersion {
+		next, err = EnsureRuntimeAuthFields(next)
+		if err != nil {
+			return cred, fmt.Errorf("rebuild qoder runtime authentication: %w", err)
+		}
 	}
 	return next, nil
 }
 
-// AuthState is shared by model discovery and inference so a token refresh cannot
-// leave one half of the proxy using stale credentials.
+// AuthState is shared by model discovery and inference so token/profile refreshes
+// are coalesced and committed atomically without holding a mutex across network I/O.
+const (
+	credentialRefreshSkew       = time.Hour
+	authNetworkTimeout          = 30 * time.Second
+	authUpdateRetryDelay        = 30 * time.Second
+	credentialPersistRetryDelay = 30 * time.Second
+)
+
 type AuthState struct {
 	mu      sync.Mutex
 	client  *http.Client
 	cred    credential.Credential
 	signer  *InferSigner
 	persist func(credential.Credential) error
+
+	updating       chan struct{}
+	updateRetryAt  time.Time
+	lastUpdateErr  error
+	persistDirty   bool
+	persistRetryAt time.Time
 }
 
 func NewAuthState(client *http.Client, cred credential.Credential) *AuthState {
@@ -397,6 +437,7 @@ func (a *AuthState) SetPersist(fn func(credential.Credential) error) {
 	a.mu.Lock()
 	a.persist = fn
 	a.mu.Unlock()
+	a.persistDirtyBestEffort(false)
 }
 
 func (a *AuthState) CredentialSnapshot() credential.Credential {
@@ -408,82 +449,182 @@ func (a *AuthState) CredentialSnapshot() credential.Credential {
 	return a.cred
 }
 
-func (a *AuthState) persistLocked() {
-	if a.persist == nil {
+func sameCredentialGeneration(a, b credential.Credential) bool {
+	return a.Token == b.Token &&
+		a.RefreshToken == b.RefreshToken &&
+		a.CosyKey == b.CosyKey &&
+		a.EncryptUserInfo == b.EncryptUserInfo &&
+		a.RuntimeProfileVersion == b.RuntimeProfileVersion
+}
+
+func (a *AuthState) persistDirtyBestEffort(force bool) {
+	if a == nil {
 		return
 	}
-	if err := a.persist(a.cred); err != nil {
-		slog.Warn("persist refreshed qoder credential failed", "error", err)
+	a.mu.Lock()
+	now := time.Now()
+	if !a.persistDirty || a.persist == nil || (!force && now.Before(a.persistRetryAt)) {
+		a.mu.Unlock()
+		return
+	}
+	persist := a.persist
+	snapshot := a.cred
+	a.persistRetryAt = now.Add(credentialPersistRetryDelay)
+	a.mu.Unlock()
+
+	err := persist(snapshot)
+
+	a.mu.Lock()
+	if err == nil && sameCredentialGeneration(a.cred, snapshot) {
+		a.persistDirty = false
+		a.persistRetryAt = time.Time{}
+	} else if err != nil {
+		a.persistDirty = true
+		a.persistRetryAt = time.Now().Add(credentialPersistRetryDelay)
+	}
+	a.mu.Unlock()
+	if err != nil {
+		slog.Warn("persist refreshed qoder credential failed; will retry", "error", err)
 	}
 }
 
-func (a *AuthState) ensureFreshLocked(ctx context.Context) error {
+func (a *AuthState) ensureReady(ctx context.Context, forceRefresh bool) error {
 	if a == nil {
 		return fmt.Errorf("qoder auth state is unavailable")
 	}
-	now := time.Now().Unix()
-	if a.cred.RefreshTokenExpiresAt > 0 && now >= a.cred.RefreshTokenExpiresAt {
-		if a.cred.ExpiresAt > 0 && now >= a.cred.ExpiresAt {
+	a.persistDirtyBestEffort(false)
+	for {
+		a.mu.Lock()
+		now := time.Now()
+		nowUnix := now.Unix()
+		cred := a.cred
+		accessExpired := cred.ExpiresAt > 0 && nowUnix >= cred.ExpiresAt
+		refreshExpired := cred.RefreshTokenExpiresAt > 0 && nowUnix >= cred.RefreshTokenExpiresAt
+		needsMigration := cred.RuntimeProfileVersion < currentRuntimeProfileVersion
+		needsRefresh := forceRefresh || (cred.ExpiresAt > 0 && cred.ExpiresAt-int64(credentialRefreshSkew/time.Second) <= nowUnix)
+
+		if refreshExpired && (forceRefresh || accessExpired) {
+			a.mu.Unlock()
 			return fmt.Errorf("qoder refresh token expired; authorize again")
 		}
-		return nil
-	}
-	needsRefresh := a.cred.ExpiresAt > 0 && a.cred.ExpiresAt-int64(credentialRefreshSkew/time.Second) <= now
-	if !needsRefresh {
-		return nil
-	}
-	if strings.TrimSpace(a.cred.RefreshToken) == "" {
-		if now >= a.cred.ExpiresAt {
-			return fmt.Errorf("qoder credential expired and cannot be refreshed; authorize again")
+		if needsRefresh && strings.TrimSpace(cred.RefreshToken) == "" {
+			if forceRefresh || accessExpired {
+				a.mu.Unlock()
+				return fmt.Errorf("qoder credential expired and cannot be refreshed; authorize again")
+			}
+			needsRefresh = false
 		}
-		return nil
-	}
-	next, err := RefreshCredential(ctx, a.client, a.cred)
-	if err != nil {
-		if now >= a.cred.ExpiresAt {
-			return err
+		if !needsMigration && !needsRefresh {
+			a.mu.Unlock()
+			a.persistDirtyBestEffort(false)
+			return nil
 		}
-		slog.Warn("qoder credential refresh deferred", "error", err)
-		return nil
+		if a.updating != nil {
+			done := a.updating
+			a.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-done:
+				// A concurrent successful update satisfies a force-refresh request too.
+				forceRefresh = false
+				continue
+			}
+		}
+		if now.Before(a.updateRetryAt) {
+			err := a.lastUpdateErr
+			if needsMigration || forceRefresh || accessExpired {
+				a.mu.Unlock()
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("qoder authentication update is temporarily unavailable")
+			}
+			a.mu.Unlock()
+			return nil
+		}
+
+		done := make(chan struct{})
+		a.updating = done
+		client := a.client
+		snapshot := cred
+		doRefresh := needsRefresh
+		a.mu.Unlock()
+
+		updateCtx, cancel := context.WithTimeout(ctx, authNetworkTimeout)
+		var next credential.Credential
+		var err error
+		if doRefresh {
+			next, err = RefreshCredential(updateCtx, client, snapshot)
+		} else {
+			next, err = enrichCredentialProfile(updateCtx, client, snapshot)
+		}
+		cancel()
+
+		a.mu.Lock()
+		if err == nil {
+			a.cred = next
+			a.signer = nil
+			a.updateRetryAt = time.Time{}
+			a.lastUpdateErr = nil
+			a.persistDirty = true
+		} else {
+			a.updateRetryAt = time.Now().Add(authUpdateRetryDelay)
+			a.lastUpdateErr = err
+		}
+		close(done)
+		a.updating = nil
+		a.mu.Unlock()
+
+		if err != nil {
+			if needsMigration || forceRefresh || accessExpired {
+				return err
+			}
+			slog.Warn("qoder credential refresh deferred", "error", err)
+			return nil
+		}
+		a.persistDirtyBestEffort(false)
+		forceRefresh = false
 	}
-	a.cred = next
-	a.signer = nil
-	a.persistLocked()
-	return nil
 }
 
 func (a *AuthState) Credential(ctx context.Context) (credential.Credential, error) {
-	if a == nil {
-		return credential.Credential{}, fmt.Errorf("qoder auth state is unavailable")
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if err := a.ensureFreshLocked(ctx); err != nil {
+	if err := a.ensureReady(ctx, false); err != nil {
 		return credential.Credential{}, err
 	}
-	return a.cred, nil
+	a.mu.Lock()
+	cred := a.cred
+	a.mu.Unlock()
+	return cred, nil
+}
+
+func (a *AuthState) ForceRefresh(ctx context.Context) error {
+	return a.ensureReady(ctx, true)
 }
 
 func (a *AuthState) InferSigner(ctx context.Context) (*InferSigner, error) {
-	if a == nil {
-		return nil, fmt.Errorf("qoder auth state is unavailable")
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if err := a.ensureFreshLocked(ctx); err != nil {
+	if err := a.ensureReady(ctx, false); err != nil {
 		return nil, err
 	}
-	if a.signer == nil {
-		signer, err := NewInferSigner(a.cred)
-		if err != nil {
-			return nil, err
-		}
-		a.signer = signer
-		normalized := signer.Credential()
-		if normalized.EncryptUserInfo != a.cred.EncryptUserInfo || normalized.CosyKey != a.cred.CosyKey {
-			a.cred = normalized
-			a.persistLocked()
-		}
+
+	a.mu.Lock()
+	if a.signer != nil {
+		signer := a.signer
+		a.mu.Unlock()
+		return signer, nil
 	}
-	return a.signer, nil
+	signer, err := NewInferSigner(a.cred)
+	if err != nil {
+		a.mu.Unlock()
+		return nil, err
+	}
+	normalized := signer.Credential()
+	if normalized.EncryptUserInfo != a.cred.EncryptUserInfo || normalized.CosyKey != a.cred.CosyKey {
+		a.cred = normalized
+		a.persistDirty = true
+	}
+	a.signer = signer
+	a.mu.Unlock()
+	a.persistDirtyBestEffort(false)
+	return signer, nil
 }
