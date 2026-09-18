@@ -499,7 +499,7 @@ func (a *AuthState) ensureReady(ctx context.Context, forceRefresh bool) error {
 		cred := a.cred
 		accessExpired := cred.ExpiresAt > 0 && nowUnix >= cred.ExpiresAt
 		refreshExpired := cred.RefreshTokenExpiresAt > 0 && nowUnix >= cred.RefreshTokenExpiresAt
-		needsMigration := cred.RuntimeProfileVersion < currentRuntimeProfileVersion
+		needsMigration := cred.RuntimeProfileVersion < currentRuntimeProfileVersion && cred.CreatedAt > 0
 		needsRefresh := forceRefresh || (cred.ExpiresAt > 0 && cred.ExpiresAt-int64(credentialRefreshSkew/time.Second) <= nowUnix)
 
 		if refreshExpired {
