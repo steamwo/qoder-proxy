@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -36,22 +37,38 @@ type QueueInfo struct {
 }
 
 type Client struct {
-	HTTP          *http.Client
-	Cred          credential.Credential
-	QueueRetry    QueueRetryPolicy
-	UsageObserver func(protocol.Usage)
-	queueWait     func(context.Context, time.Duration) error
+	HTTP             *http.Client
+	Cred             credential.Credential
+	Auth             *AuthState
+	InferenceBaseURL string
+	QueueRetry       QueueRetryPolicy
+	UsageObserver    func(protocol.Usage)
+	queueWait        func(context.Context, time.Duration) error
 }
 
 func NewClient(httpClient *http.Client, cred credential.Credential) *Client {
+	return NewClientWithAuth(httpClient, NewAuthState(httpClient, cred))
+}
+
+func NewClientWithAuth(httpClient *http.Client, auth *AuthState) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("QODER_PROXY_INFER_ENDPOINT")), "/")
+	if baseURL == "" {
+		baseURL = DefaultInferenceBaseURL
+	}
+	var cred credential.Credential
+	if auth != nil {
+		cred = auth.CredentialSnapshot()
+	}
 	return &Client{
-		HTTP:       httpClient,
-		Cred:       cred,
-		QueueRetry: QueueRetryPolicy{MaxRetries: 20, MaxWait: 10 * time.Minute},
-		queueWait:  waitContext,
+		HTTP:             httpClient,
+		Cred:             cred,
+		Auth:             auth,
+		InferenceBaseURL: baseURL,
+		QueueRetry:       QueueRetryPolicy{MaxRetries: 20, MaxWait: 10 * time.Minute},
+		queueWait:        waitContext,
 	}
 }
 
@@ -205,10 +222,10 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	clientSessionBound := strings.TrimSpace(req.ClientSessionKey) != ""
 	parameters := map[string]any{"max_tokens": maxTokens}
 	if req.ReasoningEffort != "" {
-		parameters["reasoningEffort"] = req.ReasoningEffort
+		parameters["reasoning_effort"] = req.ReasoningEffort
 	}
 	if req.ContextWindow > 0 {
-		parameters["contextWindow"] = req.ContextWindow
+		parameters["context_length"] = req.ContextWindow
 	}
 	isReasoning := boolField(modelConfig, "is_reasoning")
 	if req.ReasoningEffort == "none" {
@@ -250,13 +267,13 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		},
 		"model_config": modelConfig,
 		"business": map[string]any{
-			"product": "cli", "version": ClientVersion, "type": "agent", "stage": "start",
+			"product": "cli", "version": InferProtocolVersion, "type": "agent", "stage": "start",
 			"id": businessID, "name": truncateRunes(req.LastUserText, 30), "begin_at": time.Now().UnixMilli(),
 		},
 	}
-	// Intentionally do not forward temperature/top_p/stop here. reasoningEffort
-	// and contextWindow are the only additional request parameters because
-	// Qoder's current CLI/SDK exposes both as first-class per-request options.
+	// Intentionally do not forward temperature/top_p/stop here. reasoning_effort
+	// and context_length are the compatibility parameters verified against the
+	// current inference protocol baseline.
 	plainBody, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -267,21 +284,31 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	// encode the complete body and sign the encoded bytes so tools reach the
 	// agent endpoint intact.
 	encodedBody := qoderEncodeBody(plainBody)
-	url := BaseURL + ChatEncodedPath
-	headers, err := BuildHeaders(encodedBody, url, c.Cred)
-	if err != nil {
-		return nil, err
+	baseURL := strings.TrimRight(strings.TrimSpace(c.InferenceBaseURL), "/")
+	if baseURL == "" {
+		baseURL = DefaultInferenceBaseURL
 	}
-	headers.Set("Content-Type", "application/json")
-	headers.Set("Accept", "text/event-stream")
-	headers.Set("Cache-Control", "no-cache")
-	headers.Set("Accept-Encoding", "identity")
-	headers.Set("X-Model-Key", req.ModelID)
+	url := baseURL + ChatEncodedPath
 	source := firstString(modelConfig, "source")
 	if source == "" {
 		source = "system"
 	}
-	headers.Set("X-Model-Source", source)
+	var signer *InferSigner
+	if c.Auth != nil {
+		signer, err = c.Auth.InferSigner(ctx)
+	} else {
+		signer, err = NewInferSigner(c.Cred)
+	}
+	if err != nil {
+		return nil, err
+	}
+	headers, err := signer.BuildHeaders(encodedBody, url, req.ModelID, source)
+	if err != nil {
+		return nil, err
+	}
+	// Keep identity encoding to preserve the current stream reader behavior while
+	// the inference authentication/header profile follows the verified CLI shape.
+	headers.Set("Accept-Encoding", "identity")
 	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encodedBody))
 	httpReq.Header = headers
 	// net/http otherwise injects User-Agent: Go-http-client/1.1. CFlareAIProxy's
