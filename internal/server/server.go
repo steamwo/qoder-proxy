@@ -63,6 +63,15 @@ func (b *Backend) SetModelContextDefaults(defaults map[string]int) {
 	b.defaultsMu.Unlock()
 }
 
+// SetCredentialPersister lets long-running desktop/service processes persist
+// rotated refresh tokens and stable runtime authentication fields.
+func (b *Backend) SetCredentialPersister(persist func(credential.Credential) error) {
+	if b == nil || b.Qoder == nil || b.Qoder.Auth == nil {
+		return
+	}
+	b.Qoder.Auth.SetPersist(persist)
+}
+
 func (b *Backend) applyContextDefault(req protocol.Request) (protocol.Request, error) {
 	b.defaultsMu.RLock()
 	savedDefault := b.modelContextDefaults[req.ModelID]
@@ -133,9 +142,10 @@ type Server struct {
 // New creates a server without desktop-only defaults so CLI behavior stays unchanged.
 // New 创建不含桌面专属默认值的服务，确保 CLI 行为不变。
 func New(httpClient *http.Client, cred credential.Credential, apiKey string) *Server {
-	client := qoder.NewClient(httpClient, cred)
+	auth := qoder.NewAuthState(httpClient, cred)
+	client := qoder.NewClientWithAuth(httpClient, auth)
 	client.UsageObserver = qoder.RecordRuntimeUsage
-	return &Server{Backend: &Backend{Registry: qoder.NewRegistry(httpClient, cred), Qoder: client}, APIKey: apiKey}
+	return &Server{Backend: &Backend{Registry: qoder.NewRegistryWithAuth(httpClient, auth), Qoder: client}, APIKey: apiKey}
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
