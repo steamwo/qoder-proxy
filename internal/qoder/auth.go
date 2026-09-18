@@ -104,12 +104,17 @@ func firstInt64(m map[string]any, keys ...string) int64 {
 }
 
 func firstBool(m map[string]any, keys ...string) bool {
+	value, _ := firstBoolPresent(m, keys...)
+	return value
+}
+
+func firstBoolPresent(m map[string]any, keys ...string) (bool, bool) {
 	for _, key := range keys {
 		if v, ok := m[key].(bool); ok {
-			return v
+			return v, true
 		}
 	}
-	return false
+	return false, false
 }
 
 func firstStringSlice(m map[string]any, keys ...string) []string {
@@ -355,7 +360,9 @@ func RefreshCredential(ctx context.Context, client *http.Client, cred credential
 		if tags := firstStringSlice(userInfo, "organization_tags", "organizationTags"); tags != nil {
 			next.OrganizationTags = tags
 		}
-		next.DataPolicyAgreed = firstBool(userInfo, "data_policy_agreed", "dataPolicyAgreed")
+		if value, ok := firstBoolPresent(userInfo, "data_policy_agreed", "dataPolicyAgreed"); ok {
+			next.DataPolicyAgreed = value
+		}
 	}
 	next.EncryptUserInfo = ""
 	next.CosyKey = ""
