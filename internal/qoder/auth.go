@@ -549,11 +549,11 @@ func (a *AuthState) ensureReady(ctx context.Context, forceRefresh bool) error {
 		}
 
 		done := make(chan struct{})
+		doRefresh := needsRefresh
 		a.updating = done
 		a.updatingRefresh = doRefresh
 		client := a.client
 		snapshot := cred
-		doRefresh := needsRefresh
 		a.mu.Unlock()
 
 		updateCtx, cancel := context.WithTimeout(ctx, authNetworkTimeout)
