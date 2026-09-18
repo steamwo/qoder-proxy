@@ -309,6 +309,7 @@ func (s *unifiedService) enableProxy() error {
 	}
 	settings := LoadSettings()
 	app := server.New(http.DefaultClient, cred, settings.APIKey)
+	app.Backend.SetCredentialPersister(s.store.Save)
 	app.Backend.SetModelReasoningDefaults(settings.ModelReasoningDefaults)
 	app.Backend.SetModelContextDefaults(settings.ModelContextDefaults)
 	maxWait, _ := time.ParseDuration(settings.QueueMaxWait)
