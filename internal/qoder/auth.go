@@ -415,6 +415,7 @@ type AuthState struct {
 	persist func(credential.Credential) error
 
 	updating       chan struct{}
+	updatingRefresh bool
 	updateRetryAt  time.Time
 	lastUpdateErr  error
 	persistDirty   bool
@@ -501,9 +502,12 @@ func (a *AuthState) ensureReady(ctx context.Context, forceRefresh bool) error {
 		needsMigration := cred.RuntimeProfileVersion < currentRuntimeProfileVersion
 		needsRefresh := forceRefresh || (cred.ExpiresAt > 0 && cred.ExpiresAt-int64(credentialRefreshSkew/time.Second) <= nowUnix)
 
-		if refreshExpired && (forceRefresh || accessExpired) {
-			a.mu.Unlock()
-			return fmt.Errorf("qoder refresh token expired; authorize again")
+		if refreshExpired {
+			if forceRefresh || accessExpired {
+				a.mu.Unlock()
+				return fmt.Errorf("qoder refresh token expired; authorize again")
+			}
+			needsRefresh = false
 		}
 		if needsRefresh && strings.TrimSpace(cred.RefreshToken) == "" {
 			if forceRefresh || accessExpired {
@@ -519,19 +523,21 @@ func (a *AuthState) ensureReady(ctx context.Context, forceRefresh bool) error {
 		}
 		if a.updating != nil {
 			done := a.updating
+			wasRefresh := a.updatingRefresh
 			a.mu.Unlock()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-done:
-				// A concurrent successful update satisfies a force-refresh request too.
-				forceRefresh = false
+				if wasRefresh {
+					forceRefresh = false
+				}
 				continue
 			}
 		}
-		if now.Before(a.updateRetryAt) {
+		if now.Before(a.updateRetryAt) && !forceRefresh && !accessExpired {
 			err := a.lastUpdateErr
-			if needsMigration || forceRefresh || accessExpired {
+			if needsMigration {
 				a.mu.Unlock()
 				if err != nil {
 					return err
@@ -544,6 +550,7 @@ func (a *AuthState) ensureReady(ctx context.Context, forceRefresh bool) error {
 
 		done := make(chan struct{})
 		a.updating = done
+		a.updatingRefresh = doRefresh
 		client := a.client
 		snapshot := cred
 		doRefresh := needsRefresh
@@ -572,6 +579,7 @@ func (a *AuthState) ensureReady(ctx context.Context, forceRefresh bool) error {
 		}
 		close(done)
 		a.updating = nil
+		a.updatingRefresh = false
 		a.mu.Unlock()
 
 		if err != nil {
