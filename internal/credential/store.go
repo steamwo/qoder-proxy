@@ -10,16 +10,22 @@ import (
 )
 
 type Credential struct {
-	Token          string `json:"token"`
-	RefreshToken   string `json:"refresh_token,omitempty"`
-	UserID         string `json:"user_id"`
-	MachineID      string `json:"machine_id"`
-	Name           string `json:"name,omitempty"`
-	Email          string `json:"email,omitempty"`
-	OrganizationID string `json:"organization_id,omitempty"`
-	MemberID       string `json:"member_id,omitempty"`
-	ExpiresAt      int64  `json:"expires_at,omitempty"`
-	CreatedAt      int64  `json:"created_at"`
+	Token                 string   `json:"token"`
+	RefreshToken          string   `json:"refresh_token,omitempty"`
+	RefreshTokenExpiresAt int64    `json:"refresh_token_expires_at,omitempty"`
+	UserID                string   `json:"user_id"`
+	MachineID             string   `json:"machine_id"`
+	Name                  string   `json:"name,omitempty"`
+	Email                 string   `json:"email,omitempty"`
+	OrganizationID        string   `json:"organization_id,omitempty"`
+	OrganizationTags      []string `json:"organization_tags,omitempty"`
+	DataPolicyAgreed      bool     `json:"data_policy_agreed,omitempty"`
+	RuntimeProfileVersion int      `json:"runtime_profile_version,omitempty"`
+	MemberID              string   `json:"member_id,omitempty"`
+	EncryptUserInfo       string   `json:"encrypt_user_info,omitempty"`
+	CosyKey               string   `json:"cosy_key,omitempty"`
+	ExpiresAt             int64    `json:"expires_at,omitempty"`
+	CreatedAt             int64    `json:"created_at"`
 }
 
 func (c Credential) Valid() bool {

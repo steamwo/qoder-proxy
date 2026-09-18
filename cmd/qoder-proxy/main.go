@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"net/http"
 	"time"
 
 	"github.com/steamwo/qoder-proxy/internal/credential"
 	"github.com/steamwo/qoder-proxy/internal/desktop"
+	"github.com/steamwo/qoder-proxy/internal/qoder"
 )
 
 // The headless entry point intentionally reuses the same credential, settings,
@@ -30,11 +32,23 @@ func main() {
 		fatal(err)
 	}
 	if cred.Expired() {
-		fatal(fmt.Errorf("stored Qoder credential is expired; log in with the desktop app first"))
+		if cred.RefreshToken == "" {
+			fatal(fmt.Errorf("stored Qoder credential is expired; log in with the desktop app first"))
+		}
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cred, err = qoder.RefreshCredential(refreshCtx, http.DefaultClient, cred)
+		cancel()
+		if err != nil {
+			fatal(fmt.Errorf("refresh stored Qoder credential: %w", err))
+		}
+		if err := store.Save(cred); err != nil {
+			fatal(err)
+		}
 	}
 
 	settings := desktop.LoadSettings()
 	var proxy desktop.ProxyManager
+	proxy.SetCredentialPersister(store.Save)
 	if err := proxy.Start(cred, settings); err != nil {
 		fatal(err)
 	}

@@ -323,6 +323,7 @@ QODER_PROXY_LOG_LEVEL=debug ./qoder-proxy serve
 | `QODER_PROXY_API_KEY` | 可选的本地 Bearer API Key |
 | `QODER_PROXY_CREDENTIALS` | 覆盖账号凭据 JSON 路径 |
 | `QODER_PROXY_LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error`、`off` |
+| `QODER_PROXY_INFER_ENDPOINT` | 覆盖 Qoder 推理端点；默认使用已验证协议基线的 `https://api2.qoder.sh` |
 | `QODER_PROXY_QUEUE_RETRIES` | 免费账号排队重试次数 |
 | `QODER_PROXY_QUEUE_MAX_WAIT` | 排队总等待上限 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Go 标准 HTTP 代理变量 |

@@ -305,10 +305,22 @@ func (s *unifiedService) enableProxy() error {
 		return err
 	}
 	if cred.Expired() {
-		return errors.New("stored Qoder credential is expired; authorize again from /admin/")
+		if cred.RefreshToken == "" {
+			return errors.New("stored Qoder credential is expired; authorize again from /admin/")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cred, err = qoder.RefreshCredential(ctx, http.DefaultClient, cred)
+		if err != nil {
+			return fmt.Errorf("refresh stored Qoder credential: %w", err)
+		}
+		if err := s.store.Save(cred); err != nil {
+			return err
+		}
 	}
 	settings := LoadSettings()
 	app := server.New(http.DefaultClient, cred, settings.APIKey)
+	app.Backend.SetCredentialPersister(s.store.Save)
 	app.Backend.SetModelReasoningDefaults(settings.ModelReasoningDefaults)
 	app.Backend.SetModelContextDefaults(settings.ModelContextDefaults)
 	maxWait, _ := time.ParseDuration(settings.QueueMaxWait)

@@ -41,7 +41,7 @@ func FetchQuota(ctx context.Context, client *http.Client, cred credential.Creden
 	}
 	req.Header.Set("Authorization", "Bearer "+cred.Token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "qoder-proxy/0.3.3-desktop-ui")
+	req.Header.Set("User-Agent", UserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
 		return QuotaSnapshot{}, err

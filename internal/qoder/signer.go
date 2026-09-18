@@ -96,7 +96,7 @@ func BuildHeaders(body []byte, requestURL string, cred credential.Credential) (h
 	payloadJSON, err := json.Marshal(map[string]string{
 		"version": "v1", "requestId": requestID,
 		"info":        base64.StdEncoding.EncodeToString(encInfo),
-		"cosyVersion": ClientVersion, "ideVersion": "",
+		"cosyVersion": LegacyClientVersion, "ideVersion": "",
 	})
 	if err != nil {
 		return nil, err
@@ -129,7 +129,7 @@ func BuildHeaders(body []byte, requestURL string, cred credential.Credential) (h
 	h.Set("Cosy-Key", cosyKey)
 	h.Set("Cosy-User", cred.UserID)
 	h.Set("Cosy-Date", timestamp)
-	h.Set("Cosy-Version", ClientVersion)
+	h.Set("Cosy-Version", LegacyClientVersion)
 	h.Set("Cosy-Machineid", machineID)
 	h.Set("Cosy-Machinetoken", machineID)
 	h.Set("Cosy-Machinetype", "5")
@@ -144,5 +144,183 @@ func BuildHeaders(body []byte, requestURL string, cred credential.Credential) (h
 	h.Set("Cosy-Organization-Tags", "")
 	h.Set("Login-Version", "v2")
 	h.Set("X-Request-Id", xRequestID)
+	return h, nil
+}
+
+
+type runtimeUserInfo struct {
+	UID              string   `json:"uid"`
+	OrganizationID   string   `json:"organization_id"`
+	OrganizationTags []string `json:"organization_tags"`
+	DataPolicyAgreed bool     `json:"data_policy_agreed"`
+}
+
+type inferAuthorizationPayload struct {
+	Version     string `json:"version"`
+	RequestID   string `json:"requestId"`
+	Info        string `json:"info"`
+	CosyVersion string `json:"cosyVersion"`
+	IDEVersion  string `json:"ideVersion"`
+}
+
+// InferSigner keeps the runtime COSY authentication fields stable for the
+// lifetime of an authenticated client. Per-request UUIDs and timestamps remain
+// fresh, matching the verified Qoder CLI inference context behavior.
+type InferSigner struct {
+	cred credential.Credential
+}
+
+// EnsureRuntimeAuthFields fills the long-lived runtime fields when loading an
+// older credential file. Existing fields are preserved so proxy restarts retain
+// the same authenticated context instead of changing identity on every request.
+func EnsureRuntimeAuthFields(cred credential.Credential) (credential.Credential, error) {
+	if cred.EncryptUserInfo != "" && cred.CosyKey != "" {
+		return cred, nil
+	}
+	if cred.CreatedAt > 0 && cred.RuntimeProfileVersion < currentRuntimeProfileVersion {
+		return cred, fmt.Errorf("persisted qoder credential requires runtime profile migration")
+	}
+	if cred.UserID == "" {
+		return cred, fmt.Errorf("qoder credential requires user_id")
+	}
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return cred, err
+	}
+	value := reverseMaskUUIDBytes(raw)
+	var keyHex [16]byte
+	hex.Encode(keyHex[:], value[:8])
+	key := keyHex[:]
+
+	tags := append([]string(nil), cred.OrganizationTags...)
+	if tags == nil {
+		tags = []string{}
+	}
+	plain, err := json.Marshal(runtimeUserInfo{
+		UID:              cred.UserID,
+		OrganizationID:   cred.OrganizationID,
+		OrganizationTags: tags,
+		DataPolicyAgreed: cred.DataPolicyAgreed,
+	})
+	if err != nil {
+		return cred, err
+	}
+	encInfo, err := aesCBCEncrypt(plain, key)
+	if err != nil {
+		return cred, err
+	}
+	pub, err := qoderPublicKey()
+	if err != nil {
+		return cred, err
+	}
+	encKey, err := rsa.EncryptPKCS1v15(rand.Reader, pub, key) // #nosec G402 -- Qoder protocol requires PKCS#1 v1.5.
+	if err != nil {
+		return cred, err
+	}
+	cred.EncryptUserInfo = base64.StdEncoding.EncodeToString(encInfo)
+	cred.CosyKey = base64.StdEncoding.EncodeToString(encKey)
+	return cred, nil
+}
+
+func NewInferSigner(cred credential.Credential) (*InferSigner, error) {
+	normalized, err := EnsureRuntimeAuthFields(cred)
+	if err != nil {
+		return nil, err
+	}
+	return &InferSigner{cred: normalized}, nil
+}
+
+func (s *InferSigner) Credential() credential.Credential {
+	if s == nil {
+		return credential.Credential{}
+	}
+	return s.cred
+}
+
+func reverseMaskUUIDBytes(raw [16]byte) [16]byte {
+	var value [16]byte
+	for i := range raw {
+		value[i] = raw[len(raw)-1-i]
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	return value
+}
+
+func inferRequestUUID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	value := reverseMaskUUIDBytes(raw)
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		value[0:4], value[4:6], value[6:8], value[8:10], value[10:16]), nil
+}
+
+// BuildHeaders prepares the verified inference-only header profile. The legacy
+// BuildHeaders function remains unchanged for generic/model APIs.
+func (s *InferSigner) BuildHeaders(body []byte, requestURL, modelKey, modelSource string) (http.Header, error) {
+	if s == nil || s.cred.UserID == "" || s.cred.MachineID == "" || s.cred.EncryptUserInfo == "" || s.cred.CosyKey == "" {
+		return nil, fmt.Errorf("qoder inference credential is incomplete")
+	}
+	requestID, err := inferRequestUUID()
+	if err != nil {
+		return nil, err
+	}
+	payloadJSON, err := json.Marshal(inferAuthorizationPayload{
+		Version:     "v1",
+		RequestID:   requestID,
+		Info:        s.cred.EncryptUserInfo,
+		CosyVersion: InferProtocolVersion,
+		IDEVersion:  "",
+	})
+	if err != nil {
+		return nil, err
+	}
+	payload := base64.StdEncoding.EncodeToString(payloadJSON)
+	u, err := url.Parse(requestURL)
+	if err != nil {
+		return nil, err
+	}
+	sigPath := u.Path
+	if strings.HasPrefix(sigPath, "/algo") {
+		sigPath = strings.TrimPrefix(sigPath, "/algo")
+	}
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	sigInput := []byte(payload + "\n" + s.cred.CosyKey + "\n" + timestamp + "\n" + string(body) + "\n" + sigPath)
+
+	policy := "disagree"
+	if s.cred.DataPolicyAgreed {
+		policy = "agree"
+	}
+	h := make(http.Header, 22)
+	h.Set("Accept", "text/event-stream")
+	h.Set("Authorization", "Bearer COSY."+payload+"."+md5Hex(sigInput))
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("Content-Type", "application/json")
+	h.Set("Cosy-Business-Product", "cli")
+	h.Set("Cosy-Business-Type", "agent")
+	h.Set("Cosy-Clienttype", "5")
+	h.Set("Cosy-Data-Policy", policy)
+	h.Set("Cosy-Date", timestamp)
+	h.Set("Cosy-Key", s.cred.CosyKey)
+	h.Set("Cosy-Machineid", s.cred.MachineID)
+	h.Set("Cosy-Machinetoken", s.cred.MachineID)
+	h.Set("Cosy-Machinetype", "5")
+	if s.cred.OrganizationID != "" {
+		h.Set("Cosy-Organization-Id", s.cred.OrganizationID)
+	}
+	if len(s.cred.OrganizationTags) > 0 {
+		h.Set("Cosy-Organization-Tags", strings.Join(s.cred.OrganizationTags, ","))
+	}
+	h.Set("Cosy-Scene", "assistant")
+	h.Set("Cosy-User", s.cred.UserID)
+	h.Set("Cosy-Version", InferProtocolVersion)
+	h.Set("Login-Version", "v2")
+	if modelKey != "" {
+		h.Set("X-Model-Key", modelKey)
+		h.Set("X-Model-Source", modelSource)
+	}
 	return h, nil
 }

@@ -46,8 +46,8 @@ func TestChatSendsContextWindowParameter(t *testing.T) {
 	if !ok {
 		t.Fatalf("parameters=%#v", body["parameters"])
 	}
-	if got := int(params["contextWindow"].(float64)); got != 1000000 {
-		t.Fatalf("contextWindow=%d parameters=%#v", got, params)
+	if got := int(params["context_length"].(float64)); got != 1000000 {
+		t.Fatalf("context_length=%d parameters=%#v", got, params)
 	}
 }
 
@@ -84,7 +84,10 @@ func TestChatOmitsContextWindowInAutoMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("parameters=%#v", body["parameters"])
 	}
+	if _, exists := params["context_length"]; exists {
+		t.Fatalf("context_length must be omitted in auto mode: %#v", params)
+	}
 	if _, exists := params["contextWindow"]; exists {
-		t.Fatalf("contextWindow must be omitted in auto mode: %#v", params)
+		t.Fatalf("legacy contextWindow must be omitted in auto mode: %#v", params)
 	}
 }

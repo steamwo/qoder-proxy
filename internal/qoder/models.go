@@ -144,6 +144,7 @@ func reasoningEfforts(raw map[string]any) []string {
 type Registry struct {
 	client *http.Client
 	cred   credential.Credential
+	auth   *AuthState
 
 	mu        sync.RWMutex
 	models    []Model
@@ -154,16 +155,33 @@ type Registry struct {
 }
 
 func NewRegistry(client *http.Client, cred credential.Credential) *Registry {
+	return NewRegistryWithAuth(client, NewAuthState(client, cred))
+}
+
+func NewRegistryWithAuth(client *http.Client, auth *AuthState) *Registry {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &Registry{client: client, cred: cred, ttl: 5 * time.Minute}
+	var cred credential.Credential
+	if auth != nil {
+		cred = auth.CredentialSnapshot()
+	}
+	return &Registry{client: client, cred: cred, auth: auth, ttl: 5 * time.Minute}
 }
 
 func (r *Registry) Refresh(ctx context.Context) error {
 	started := time.Now()
 	slog.Debug("refreshing qoder models")
-	models, err := fetchModels(ctx, r.client, r.cred)
+	cred := r.cred
+	var err error
+	if r.auth != nil {
+		cred, err = r.auth.Credential(ctx)
+		if err != nil {
+			slog.Error("qoder model authentication refresh failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
+			return err
+		}
+	}
+	models, err := fetchModels(ctx, r.client, cred)
 	if err != nil {
 		slog.Error("qoder model refresh failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return err
