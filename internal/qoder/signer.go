@@ -177,6 +177,9 @@ func EnsureRuntimeAuthFields(cred credential.Credential) (credential.Credential,
 	if cred.EncryptUserInfo != "" && cred.CosyKey != "" {
 		return cred, nil
 	}
+	if cred.CreatedAt > 0 && cred.RuntimeProfileVersion < currentRuntimeProfileVersion {
+		return cred, fmt.Errorf("persisted qoder credential requires runtime profile migration")
+	}
 	if cred.UserID == "" {
 		return cred, fmt.Errorf("qoder credential requires user_id")
 	}
