@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steamwo/qoder-proxy/internal/credential"
+	"github.com/steamwo/qoder-proxy/internal/qoder"
 )
 
 const defaultControlListen = "127.0.0.1:39091"
@@ -172,8 +173,20 @@ func (s *backgroundService) startProxy() error {
 		return err
 	}
 	if cred.Expired() {
-		return fmt.Errorf("stored Qoder credential is expired; log in with the desktop app")
+		if cred.RefreshToken == "" {
+			return fmt.Errorf("stored Qoder credential is expired; log in with the desktop app")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cred, err = qoder.RefreshCredential(ctx, http.DefaultClient, cred)
+		if err != nil {
+			return fmt.Errorf("refresh stored Qoder credential: %w", err)
+		}
+		if err := s.store.Save(cred); err != nil {
+			return err
+		}
 	}
+	s.proxy.SetCredentialPersister(s.store.Save)
 	return s.proxy.Start(cred, LoadSettings())
 }
 
