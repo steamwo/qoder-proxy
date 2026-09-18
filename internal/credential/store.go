@@ -20,6 +20,7 @@ type Credential struct {
 	OrganizationID        string   `json:"organization_id,omitempty"`
 	OrganizationTags      []string `json:"organization_tags,omitempty"`
 	DataPolicyAgreed      bool     `json:"data_policy_agreed,omitempty"`
+	RuntimeProfileVersion int      `json:"runtime_profile_version,omitempty"`
 	MemberID              string   `json:"member_id,omitempty"`
 	EncryptUserInfo       string   `json:"encrypt_user_info,omitempty"`
 	CosyKey               string   `json:"cosy_key,omitempty"`
