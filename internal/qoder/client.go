@@ -50,6 +50,26 @@ func NewClient(httpClient *http.Client, cred credential.Credential) *Client {
 	return NewClientWithAuth(httpClient, NewAuthState(httpClient, cred))
 }
 
+func inferenceHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	clone := *client
+	switch transport := client.Transport.(type) {
+	case nil:
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			t := base.Clone()
+			t.DisableCompression = true
+			clone.Transport = t
+		}
+	case *http.Transport:
+		t := transport.Clone()
+		t.DisableCompression = true
+		clone.Transport = t
+	}
+	return &clone
+}
+
 func NewClientWithAuth(httpClient *http.Client, auth *AuthState) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
@@ -63,7 +83,7 @@ func NewClientWithAuth(httpClient *http.Client, auth *AuthState) *Client {
 		cred = auth.CredentialSnapshot()
 	}
 	return &Client{
-		HTTP:             httpClient,
+		HTTP:             inferenceHTTPClient(httpClient),
 		Cred:             cred,
 		Auth:             auth,
 		InferenceBaseURL: baseURL,
@@ -252,6 +272,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"chat_prompt":      "",
 		"image_urls":       nullableImageURLs(topLevelImages),
 		"aliyun_user_type": "",
+		"custom_model":     nil,
 		"system":           req.System,
 		"messages":         messages,
 		"tools":            tools,
@@ -306,15 +327,21 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	if err != nil {
 		return nil, err
 	}
-	// Keep identity encoding to preserve the current stream reader behavior while
-	// the inference authentication/header profile follows the verified CLI shape.
-	headers.Set("Accept-Encoding", "identity")
-	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encodedBody))
-	httpReq.Header = headers
-	// net/http otherwise injects User-Agent: Go-http-client/1.1. CFlareAIProxy's
-	// Worker fetch does not explicitly send a Qoder client user-agent, so suppress
-	// Go's transport fingerprint here for closer protocol parity.
-	httpReq.Header["User-Agent"] = []string{""}
+	newRequest := func(h http.Header) (*http.Request, error) {
+		httpReq, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encodedBody))
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		httpReq.Header = h
+		// Suppress net/http's default Go user-agent without adding another header
+		// to the verified inference profile.
+		httpReq.Header["User-Agent"] = []string{""}
+		return httpReq, nil
+	}
+	httpReq, err := newRequest(headers)
+	if err != nil {
+		return nil, err
+	}
 	started := time.Now()
 	protocolLabel := sourceProtocolLabel(req.SourceProtocol)
 	promptPrefixHash := shortStableHash("qoder-prompt-prefix", req.System, tools)
@@ -382,6 +409,32 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		slog.Error("qoder request failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "attempt", attempt+1, "is_retry", isRetry, "client_session_bound", clientSessionBound, "session_id", sessionID, "request_set_id", requestSetID, "chat_record_id", chatRecordID, "reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort), "context_window", effectiveContextWindowLabel(req.ContextWindow), "duration_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, err
 	}
+	authRetried := false
+	if resp.StatusCode == http.StatusUnauthorized && attempt == 0 && c.Auth != nil {
+		if refreshErr := c.Auth.ForceRefresh(ctx); refreshErr == nil {
+			resp.Body.Close()
+			retrySigner, signerErr := c.Auth.InferSigner(ctx)
+			if signerErr != nil {
+				return nil, signerErr
+			}
+			retryHeaders, headerErr := retrySigner.BuildHeaders(encodedBody, url, req.ModelID, source)
+			if headerErr != nil {
+				return nil, headerErr
+			}
+			retryReq, requestErr := newRequest(retryHeaders)
+			if requestErr != nil {
+				return nil, requestErr
+			}
+			resp, err = c.HTTP.Do(retryReq)
+			if err != nil {
+				slog.Error("qoder auth retry failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "error", err)
+				return nil, err
+			}
+			authRetried = true
+		} else {
+			slog.Warn("qoder 401 token refresh failed", "operation", "chat", "model", req.PublicModel, "upstream_model", req.ModelID, "error", refreshErr)
+		}
+	}
 	slog.Info("qoder response",
 		"operation", "chat",
 		"model", req.PublicModel,
@@ -395,6 +448,7 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 		"reasoning_effort", effectiveReasoningLabel(req.ReasoningEffort),
 		"context_window", effectiveContextWindowLabel(req.ContextWindow),
 		"status", resp.StatusCode,
+		"auth_retried", authRetried,
 		"duration_ms", time.Since(started).Milliseconds(),
 		"content_type", resp.Header.Get("Content-Type"),
 		"content_length", resp.ContentLength,
