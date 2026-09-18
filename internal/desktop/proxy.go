@@ -23,7 +23,8 @@ type ProxyManager struct {
 	running bool
 	addr    string
 	started time.Time
-	backend *server.Backend
+	backend             *server.Backend
+	credentialPersister func(credential.Credential) error
 }
 
 func (p *ProxyManager) Running() bool { p.mu.RLock(); defer p.mu.RUnlock(); return p.running }
@@ -35,6 +36,12 @@ func (p *ProxyManager) Uptime() time.Duration {
 		return 0
 	}
 	return time.Since(p.started)
+}
+
+func (p *ProxyManager) SetCredentialPersister(persist func(credential.Credential) error) {
+	p.mu.Lock()
+	p.credentialPersister = persist
+	p.mu.Unlock()
 }
 
 // Start applies the durable model defaults to the server instance created for this proxy run.
@@ -50,6 +57,9 @@ func (p *ProxyManager) Start(cred credential.Credential, s Settings) error {
 		return err
 	}
 	app := server.New(http.DefaultClient, cred, s.APIKey)
+	if p.credentialPersister != nil {
+		app.Backend.SetCredentialPersister(p.credentialPersister)
+	}
 	app.Backend.SetModelReasoningDefaults(s.ModelReasoningDefaults)
 	app.Backend.SetModelContextDefaults(s.ModelContextDefaults)
 	maxWait, _ := time.ParseDuration(s.QueueMaxWait)
