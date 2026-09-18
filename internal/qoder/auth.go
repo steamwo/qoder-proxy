@@ -333,8 +333,6 @@ func fetchUserInfo(ctx context.Context, client *http.Client, token string) (map[
 }
 
 
-const credentialRefreshSkew = time.Hour
-
 // RefreshCredential rotates the device token and rebuilds the long-lived COSY
 // runtime fields. It is intentionally independent of the local credential store
 // so headless and embedded callers can decide how persistence is handled.
