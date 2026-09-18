@@ -1,8 +1,12 @@
 package qoder
 
 import (
+	"context"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steamwo/qoder-proxy/internal/credential"
 )
@@ -104,5 +108,68 @@ func TestInferSignerOmitsEmptyOrganizationHeaders(t *testing.T) {
 	}
 	if _, ok := h["Cosy-Organization-Tags"]; ok {
 		t.Fatal("empty organization tags header must be omitted")
+	}
+}
+
+
+func TestAuthStateRefreshesAndPersistsRotatedCredential(t *testing.T) {
+	var persisted credential.Credential
+	var refreshCalls int
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/api/v1/deviceToken/refresh":
+			refreshCalls++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"device_token":"new-token","refresh_token":"new-refresh","expires_in":7200,"refresh_token_expires_in":86400}`)),
+				Request: r,
+			}, nil
+		case "/api/v1/userinfo":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"id":"u1","organization_id":"org-2","organization_tags":["tag-a"],"data_policy_agreed":true}`)),
+				Request: r,
+			}, nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+			return nil, nil
+		}
+	})}
+	state := NewAuthState(hc, credential.Credential{
+		Token: "old-token", RefreshToken: "old-refresh", UserID: "u1", MachineID: "m1",
+		ExpiresAt: time.Now().Add(30 * time.Minute).Unix(),
+		RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour).Unix(),
+	})
+	state.SetPersist(func(c credential.Credential) error {
+		persisted = c
+		return nil
+	})
+	got, err := state.Credential(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh calls=%d", refreshCalls)
+	}
+	if got.Token != "new-token" || got.RefreshToken != "new-refresh" {
+		t.Fatalf("refreshed credential=%#v", got)
+	}
+	if got.OrganizationID != "org-2" || len(got.OrganizationTags) != 1 || !got.DataPolicyAgreed {
+		t.Fatalf("refreshed user profile=%#v", got)
+	}
+	if got.EncryptUserInfo == "" || got.CosyKey == "" {
+		t.Fatal("runtime auth fields were not rebuilt")
+	}
+	if persisted.Token != "new-token" || persisted.CosyKey == "" {
+		t.Fatalf("persisted credential=%#v", persisted)
+	}
+	signer, err := state.InferSigner(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signer.Credential().CosyKey != got.CosyKey {
+		t.Fatal("shared signer did not reuse refreshed runtime fields")
 	}
 }
