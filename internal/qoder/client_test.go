@@ -217,7 +217,7 @@ func TestChatSendsReasoningEffortParameter(t *testing.T) {
 	if !ok {
 		t.Fatalf("parameters=%#v", body["parameters"])
 	}
-	if params["reasoningEffort"] != "high" {
+	if params["reasoning_effort"] != "high" {
 		t.Fatalf("parameters=%#v", params)
 	}
 	extra := body["chat_context"].(map[string]any)["extra"].(map[string]any)
@@ -261,7 +261,77 @@ func TestChatOmitsReasoningEffortWhenNormalizedAway(t *testing.T) {
 	if !ok {
 		t.Fatalf("parameters=%#v", body["parameters"])
 	}
+	if _, exists := params["reasoning_effort"]; exists {
+		t.Fatalf("reasoning_effort leaked into Qoder payload: %#v", params)
+	}
 	if _, exists := params["reasoningEffort"]; exists {
-		t.Fatalf("reasoningEffort leaked into Qoder payload: %#v", params)
+		t.Fatalf("legacy reasoningEffort leaked into Qoder payload: %#v", params)
+	}
+}
+
+
+func TestChatReusesCosyRuntimeKeyAndDefaultsToVerifiedEndpoint(t *testing.T) {
+	var keys []string
+	var hosts []string
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		keys = append(keys, r.Header.Get("Cosy-Key"))
+		hosts = append(hosts, r.URL.Host)
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			Request:    r,
+		}, nil
+	})}
+	c := NewClient(hc, credential.Credential{Token: "token", UserID: "u1", MachineID: "m1"})
+	req := protocol.Request{
+		PublicModel: "Display", ModelID: "model-id",
+		ModelConfig: map[string]any{"key": "model-id", "source": "system", "max_output_tokens": 1024},
+		Messages: []map[string]any{{"role": "user", "content": "hello"}}, LastUserText: "hello",
+	}
+	for i := 0; i < 2; i++ {
+		resp, err := c.Chat(context.Background(), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] {
+		t.Fatalf("Cosy-Key values=%#v", keys)
+	}
+	if len(hosts) != 2 || hosts[0] != "api2.qoder.sh" || hosts[1] != "api2.qoder.sh" {
+		t.Fatalf("inference hosts=%#v", hosts)
+	}
+}
+
+func TestChatUsesSnakeCaseContextLength(t *testing.T) {
+	var body map[string]any
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		encoded, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(decodeQoderBodyForTest(t, encoded), &body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader("data: [DONE]\n\n")), Request: r,
+		}, nil
+	})}
+	c := NewClient(hc, credential.Credential{Token: "token", UserID: "u1", MachineID: "m1"})
+	resp, err := c.Chat(context.Background(), protocol.Request{
+		PublicModel: "Display", ModelID: "model-id", ContextWindow: 262144,
+		ModelConfig: map[string]any{"key": "model-id", "max_output_tokens": 1024},
+		Messages: []map[string]any{{"role": "user", "content": "hello"}}, LastUserText: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	params := body["parameters"].(map[string]any)
+	if got := int(params["context_length"].(float64)); got != 262144 {
+		t.Fatalf("context_length=%d", got)
+	}
+	if _, exists := params["contextWindow"]; exists {
+		t.Fatalf("legacy contextWindow leaked into payload: %#v", params)
 	}
 }
