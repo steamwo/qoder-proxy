@@ -180,7 +180,6 @@ func (r *Registry) Refresh(ctx context.Context) error {
 			slog.Error("qoder model authentication refresh failed", "duration_ms", time.Since(started).Milliseconds(), "error", err)
 			return err
 		}
-		r.cred = cred
 	}
 	models, err := fetchModels(ctx, r.client, cred)
 	if err != nil {
