@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"gioui.org/layout"
@@ -105,7 +106,7 @@ func (s *appState) modelTableV2(gtx layout.Context, th *material.Theme, models [
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Top: 10}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return bodyLabel(gtx, th, "上下文列显示 Qoder 实时最大档位，并可在支持时设置默认窗口；输出与思考能力同样来自实时模型配置。", ui.faint, 11)
+					return bodyLabel(gtx, th, "上下文列显示 Qoder 实时最大档位，并可在支持时设置默认窗口；倍率与思考能力同样来自实时模型配置。", ui.faint, 11)
 				})
 			}),
 		)
@@ -117,7 +118,7 @@ func modelHeaderV2(gtx layout.Context, th *material.Theme) layout.Dimensions {
 		return layout.Flex{}.Layout(gtx,
 			layout.Flexed(1.25, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "模型", ui.faint, 12) }),
 			layout.Flexed(.55, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "上下文上限", ui.faint, 12) }),
-			layout.Flexed(.55, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "输出上限", ui.faint, 12) }),
+			layout.Flexed(.55, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "倍率", ui.faint, 12) }),
 			layout.Flexed(.9, func(gtx layout.Context) layout.Dimensions { return bodyLabel(gtx, th, "默认思考", ui.faint, 12) }),
 		)
 	})
@@ -137,7 +138,7 @@ func (s *appState) modelRowV2(gtx layout.Context, th *material.Theme, model qode
 								return s.inlineContextSelector(gtx, th, model)
 							}),
 							layout.Flexed(.55, func(gtx layout.Context) layout.Dimensions {
-								return bodyLabel(gtx, th, humanTokens(model.MaxOutputTokens), ui.muted, 12)
+								return bodyLabel(gtx, th, modelPriceFactorLabel(model), ui.muted, 12)
 							}),
 							layout.Flexed(.9, func(gtx layout.Context) layout.Dimensions {
 								return s.inlineReasoningSelector(gtx, th, model)
@@ -173,6 +174,13 @@ func (s *appState) modelRowV2(gtx layout.Context, th *material.Theme, model qode
 			})
 		})
 	})
+}
+
+func modelPriceFactorLabel(model qoder.Model) string {
+	if model.PriceFactor == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%gx", *model.PriceFactor)
 }
 
 func (s *appState) inlineReasoningSelector(gtx layout.Context, th *material.Theme, model qoder.Model) layout.Dimensions {
