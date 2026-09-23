@@ -66,6 +66,29 @@ func TestNumberFieldPreservesOptionalPriceFactor(t *testing.T) {
 	}
 }
 
+func TestCurrentPriceFactorPrefersActivePromotion(t *testing.T) {
+	base := 0.8
+	model := Model{
+		PriceFactor: &base,
+		Raw: map[string]any{
+			"promotion": map[string]any{
+				"active":          true,
+				"discount_factor": 0.3,
+			},
+		},
+	}
+	got := model.CurrentPriceFactor()
+	if got == nil || *got != 0.3 {
+		t.Fatalf("current price factor=%v, want 0.3", got)
+	}
+
+	model.Raw = map[string]any{"promotion": map[string]any{"active": false, "discount_factor": 0.3}}
+	got = model.CurrentPriceFactor()
+	if got == nil || *got != 0.8 {
+		t.Fatalf("inactive promotion factor=%v, want base 0.8", got)
+	}
+}
+
 func TestModelReasoningEffortCapabilities(t *testing.T) {
 	model := Model{
 		DisplayName: "Reasoning Model",
