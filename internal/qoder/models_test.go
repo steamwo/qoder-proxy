@@ -18,6 +18,54 @@ func TestModelItemsMapUsesMapKeyAsUpstreamID(t *testing.T) {
 	}
 }
 
+func TestModelItemsFromPayloadMergesServerScenes(t *testing.T) {
+	items := modelItemsFromPayload(map[string]any{
+		"chat": map[string]any{
+			"chat-model": map[string]any{
+				"display_name": "Chat Model",
+				"price_factor": 0.3,
+			},
+		},
+		"assistant": []any{
+			map[string]any{
+				"key":          "assistant-model",
+				"display_name": "Assistant Model",
+				"price_factor": 0.8,
+			},
+		},
+		"metadata": map[string]any{
+			"build": map[string]any{"version": "2026.09"},
+		},
+	})
+	if len(items) != 2 {
+		t.Fatalf("len=%d items=%v", len(items), items)
+	}
+	if items[0].scene != "chat" || firstString(items[0].raw, "key") != "chat-model" {
+		t.Fatalf("first item=(scene=%q key=%q), want chat/chat-model", items[0].scene, firstString(items[0].raw, "key"))
+	}
+	if items[1].scene != "assistant" || firstString(items[1].raw, "key") != "assistant-model" {
+		t.Fatalf("second item=(scene=%q key=%q), want assistant/assistant-model", items[1].scene, firstString(items[1].raw, "key"))
+	}
+}
+
+func TestNumberFieldPreservesOptionalPriceFactor(t *testing.T) {
+	for name, raw := range map[string]any{
+		"fraction": 0.5,
+		"free":     0.0,
+		"integer":  1,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := numberField(map[string]any{"price_factor": raw}, "price_factor")
+			if got == nil {
+				t.Fatal("price factor is nil")
+			}
+		})
+	}
+	if got := numberField(map[string]any{}, "price_factor"); got != nil {
+		t.Fatalf("missing price factor=%v, want nil", *got)
+	}
+}
+
 func TestModelReasoningEffortCapabilities(t *testing.T) {
 	model := Model{
 		DisplayName: "Reasoning Model",
