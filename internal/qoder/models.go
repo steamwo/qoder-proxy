@@ -43,6 +43,16 @@ func (m Model) SupportsReasoningDisabled() bool {
 	return reasoningDisabled(m.Raw)
 }
 
+func (m Model) CurrentPriceFactor() *float64 {
+	promotion, _ := m.Raw["promotion"].(map[string]any)
+	if boolField(promotion, "active") {
+		if discounted := numberField(promotion, "discount_factor"); discounted != nil {
+			return discounted
+		}
+	}
+	return m.PriceFactor
+}
+
 // NormalizeReasoningEffort applies the model default only when the request omitted a value, then validates it.
 // Models without configurable depth silently ignore downstream depth hints instead of forwarding unsupported
 // reasoningEffort parameters to Qoder. A model that explicitly supports disabling thinking may still accept none/off.
