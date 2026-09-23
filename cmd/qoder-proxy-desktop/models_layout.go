@@ -177,10 +177,11 @@ func (s *appState) modelRowV2(gtx layout.Context, th *material.Theme, model qode
 }
 
 func modelPriceFactorLabel(model qoder.Model) string {
-	if model.PriceFactor == nil {
+	factor := model.CurrentPriceFactor()
+	if factor == nil {
 		return "—"
 	}
-	return fmt.Sprintf("%gx", *model.PriceFactor)
+	return fmt.Sprintf("%gx", *factor)
 }
 
 func (s *appState) inlineReasoningSelector(gtx layout.Context, th *material.Theme, model qoder.Model) layout.Dimensions {
