@@ -82,6 +82,7 @@ type unifiedSettingsRequest struct {
 type unifiedModelView struct {
 	UpstreamID      string   `json:"upstream_id"`
 	DisplayName     string   `json:"display_name"`
+	PriceFactor     *float64 `json:"price_factor,omitempty"`
 	MaxInputTokens  int      `json:"max_input_tokens"`
 	MaxOutputTokens int      `json:"max_output_tokens"`
 	Options         []string `json:"options"`
@@ -631,6 +632,7 @@ func (s *unifiedService) handleUnifiedModels(w http.ResponseWriter, r *http.Requ
 		options = append(options, model.SupportedReasoningEfforts()...)
 		out = append(out, unifiedModelView{
 			UpstreamID: model.UpstreamID, DisplayName: model.DisplayName,
+			PriceFactor: model.CurrentPriceFactor(),
 			MaxInputTokens: model.MaxInputTokens, MaxOutputTokens: model.MaxOutputTokens,
 			Options: options, Default: settings.ModelReasoningDefaults[model.UpstreamID],
 		})
