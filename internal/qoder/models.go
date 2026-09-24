@@ -21,8 +21,10 @@ type Model struct {
 	UpstreamID             string         `json:"upstream_id"`
 	DisplayName            string         `json:"display_name"`
 	Source                 string         `json:"source,omitempty"`
+	ServerScene            string         `json:"server_scene,omitempty"`
 	IsReasoning            bool           `json:"is_reasoning,omitempty"`
 	IsVL                   bool           `json:"is_vl,omitempty"`
+	PriceFactor            *float64       `json:"price_factor,omitempty"`
 	MaxInputTokens         int            `json:"max_input_tokens,omitempty"`
 	MaxOutputTokens        int            `json:"max_output_tokens,omitempty"`
 	Raw                    map[string]any `json:"-"`
@@ -39,6 +41,16 @@ func (m Model) SupportedReasoningEfforts() []string {
 // SupportsReasoningDisabled 返回实时关闭能力，因为并非所有模型都接受 "none"。
 func (m Model) SupportsReasoningDisabled() bool {
 	return reasoningDisabled(m.Raw)
+}
+
+func (m Model) CurrentPriceFactor() *float64 {
+	promotion, _ := m.Raw["promotion"].(map[string]any)
+	if boolField(promotion, "active") {
+		if discounted := numberField(promotion, "discount_factor"); discounted != nil {
+			return discounted
+		}
+	}
+	return m.PriceFactor
 }
 
 // NormalizeReasoningEffort applies the model default only when the request omitted a value, then validates it.
@@ -273,9 +285,10 @@ func fetchModels(ctx context.Context, client *http.Client, cred credential.Crede
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&payload); err != nil {
 		return nil, err
 	}
-	items := modelItems(payload["chat"])
+	items := modelItemsFromPayload(payload)
 	models := make([]Model, 0, len(items))
-	for _, item := range items {
+	for _, discovered := range items {
+		item := discovered.raw
 		id := firstString(item, "key", "model", "model_id", "modelId", "id")
 		if id == "" {
 			continue
@@ -286,8 +299,9 @@ func fetchModels(ctx context.Context, client *http.Client, cred credential.Crede
 		}
 		models = append(models, Model{
 			UpstreamID: id, DisplayName: display,
-			Source:      firstString(item, "source"),
+			Source: firstString(item, "source"), ServerScene: discovered.scene,
 			IsReasoning: boolField(item, "is_reasoning"), IsVL: boolField(item, "is_vl"),
+			PriceFactor: numberField(item, "price_factor"),
 			MaxInputTokens: intField(item, "max_input_tokens"), MaxOutputTokens: intField(item, "max_output_tokens"),
 			Raw: cloneMap(item),
 		})
@@ -299,6 +313,56 @@ func fetchModels(ctx context.Context, client *http.Client, cred credential.Crede
 		return models[i].DisplayName < models[j].DisplayName
 	})
 	return models, nil
+}
+
+type discoveredModelItem struct {
+	scene string
+	raw   map[string]any
+}
+
+// modelItemsFromPayload mirrors Qoder CLI model discovery by merging model
+// collections from every server scene instead of assuming a single "chat" key.
+// modelItemsFromPayload 与 Qoder CLI 保持一致，合并各个 server scene 的模型集合，
+// 而不是只假定模型都位于 "chat" 顶层字段。
+func modelItemsFromPayload(payload map[string]any) []discoveredModelItem {
+	keys := make([]string, 0, len(payload))
+	if _, ok := payload["chat"]; ok {
+		keys = append(keys, "chat")
+	}
+	others := make([]string, 0, len(payload))
+	for key := range payload {
+		if key != "chat" {
+			others = append(others, key)
+		}
+	}
+	sort.Strings(others)
+	keys = append(keys, others...)
+
+	var out []discoveredModelItem
+	for _, scene := range keys {
+		for _, item := range modelItems(payload[scene]) {
+			if !looksLikeModelItem(item) {
+				continue
+			}
+			out = append(out, discoveredModelItem{scene: scene, raw: item})
+		}
+	}
+	return out
+}
+
+func looksLikeModelItem(item map[string]any) bool {
+	if firstString(item, "model", "model_id", "modelId", "id", "display_name", "displayName", "label", "title", "name") != "" {
+		return true
+	}
+	for _, key := range []string{
+		"source", "is_reasoning", "is_vl", "price_factor",
+		"max_input_tokens", "max_output_tokens", "thinking_config", "context_config",
+	} {
+		if _, ok := item[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func modelItems(v any) []map[string]any {
@@ -338,6 +402,28 @@ func cloneMap(in map[string]any) map[string]any {
 }
 
 func boolField(m map[string]any, k string) bool { v, _ := m[k].(bool); return v }
+
+func numberField(m map[string]any, k string) *float64 {
+	switch v := m[k].(type) {
+	case float64:
+		return &v
+	case float32:
+		value := float64(v)
+		return &value
+	case json.Number:
+		if value, err := v.Float64(); err == nil {
+			return &value
+		}
+	case int:
+		value := float64(v)
+		return &value
+	case int64:
+		value := float64(v)
+		return &value
+	}
+	return nil
+}
+
 func intField(m map[string]any, k string) int {
 	switch v := m[k].(type) {
 	case float64:

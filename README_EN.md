@@ -2,180 +2,227 @@
 
 [简体中文](README.md) · [English](README_EN.md)
 
-A standalone local Go proxy that exposes a Qoder account through OpenAI- and Anthropic-compatible HTTP APIs.
+A Go proxy that connects a Qoder account to local OpenAI- and Anthropic-compatible APIs. The project ships three front ends over the same credential, settings, model registry, and proxy core: a lightweight browser-managed service, a native Gio desktop app, and a headless service.
 
-## Supported endpoints
+> The default listen address is `127.0.0.1:9000`. The `/admin/*` management surface is restricted to loopback clients even if you intentionally expose the compatible API on a LAN address.
 
-- `GET /v1/models` (standard; `POST /v1/models` is accepted as a compatibility alias)
-- `POST /v1/chat/completions`
-- `POST /v1/responses`
-- `POST /v1/messages` (Anthropic Messages API)
+## Disclaimer
 
-All three generation endpoints support streaming and non-streaming responses. Text generation and function/tool calls are translated through a shared internal event model.
+> This project is independently maintained by **steamwo** as an unofficial, non-commercial interoperability and technical research project. It is not affiliated with, sponsored by, authorized by, or endorsed by Qoder or its operators or related companies.
 
-Per-request Qoder thinking effort is also supported and is validated against the selected model's live `thinking_config` metadata before the request is sent upstream.
+- Qoder names, trademarks, services, and products belong to their respective owners. Names are used only to identify the compatibility target.
+- The software is provided as-is, without guarantees of availability, stability, continued compatibility, security, or fitness for a particular purpose. Upstream APIs, account policies, terms, and risk controls may change at any time.
+- Users are responsible for reading and complying with applicable Qoder/model-provider terms, account policies, and local laws, and for deciding whether their use is permitted.
+- Account restrictions, bans, quota loss, data loss, outages, third-party claims, and other direct or indirect losses arising from use are the user's responsibility to assess. To the maximum extent permitted by applicable law, the author is not liable for use or inability to use this project.
+- The project is not intended to bypass payment, quota, access-control, or anti-abuse systems, or to facilitate abuse, attacks, or fraud.
+- Rights holders may contact the maintainer through the repository if they believe project content needs attention.
 
-## Model name mapping
+**Author: steamwo**
 
-Qoder's model catalogue contains an internal model identifier (`key` / `model_id`) and a user-facing `display_name`.
+## Feature overview
 
-`qoder-proxy` deliberately keeps them separate:
+### Compatible APIs
 
-- `/v1/models` exposes **only `display_name`** as the OpenAI model `id`.
-- `/v1/chat/completions` accepts `display_name`, resolves it locally, and sends the real internal model ID to Qoder.
-- `/v1/responses` uses the same mapping.
-- `/v1/messages` uses the same `display_name` mapping for Anthropic clients.
-- The Qoder request headers (`X-Model-Key`) and `model_config.key` always use the internal model ID.
+- OpenAI Chat Completions: `POST /v1/chat/completions`
+- OpenAI Responses: `POST /v1/responses`
+- Anthropic Messages: `POST /v1/messages`
+- OpenAI-style model list: `GET /v1/models`, with `POST /v1/models` compatibility
+- Streaming and non-streaming responses
+- Function Calling / Tool Use
+- OpenAI- and Anthropic-shaped errors
+- Qoder free-account queue retries, streaming heartbeats, and quota-error mapping
 
-For debugging/backward compatibility, an internal model ID can also be accepted as request input when it exists in the current catalogue, but it is never returned by `/v1/models`.
+### Live model capabilities
 
-## Build
+Model behavior is discovered from the current Qoder account instead of being hard-coded locally:
 
-Requires Go 1.23 or newer.
+- merge model collections from multiple top-level server scenes instead of reading only `chat`
+- retain each model's original `server_scene`
+- keep Qoder `display_name` as the public model ID returned by `/v1/models`
+- keep internal Qoder `key/model_id` values private to upstream requests
+- preserve deterministic public-name deduplication
+- read context-window choices from live `context_config`
+- read reasoning levels from live `thinking_config`
+- treat `price_factor` as optional model metadata
+- when an active promotion provides `promotion.discount_factor`, show that as the current multiplier in the desktop/browser model table
+- show `—` when no factor is supplied, while preserving a valid `0x` factor
 
-```bash
-go build -o qoder-proxy ./cmd/qoder-proxy
-```
+### Three runtime modes
 
-## Login
+| Entry point | Best for | Login / management |
+| --- | --- | --- |
+| `qoder-proxy-web-*` | Lightweight local service and browser management | Built-in `/admin/` UI for login, quota, models, logs, and settings |
+| `qoder-proxy-desktop-*` | Daily desktop use | Native Gio UI, no WebView, tray integration and full local controls |
+| `qoder-proxy-headless-*` | Servers and low-overhead environments | No login UI; expects credentials created by the Web or Desktop app |
 
-```bash
-./qoder-proxy login
-```
+All three modes share:
 
-The command starts Qoder's PKCE device login flow, opens the authorization URL when possible, polls for completion, fetches the user identity, and stores the resulting credential locally.
+- the Qoder credential file
+- `desktop.json`
+- per-model reasoning and context defaults
+- the optional local API key
+- queue policy
+- the same proxy backend
 
-Use this in headless environments:
+## Downloads
 
-```bash
-./qoder-proxy login --no-browser
-```
-
-Credential location:
-
-- macOS: `~/Library/Application Support/qoder-proxy/credentials.json`
-- Linux: `${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/credentials.json`
-- Windows: `%AppData%\\qoder-proxy\\credentials.json`
-
-Override it with `QODER_PROXY_CREDENTIALS`.
-
-The current MVP stores the credential as a local JSON file with `0600` permissions where the OS supports Unix file modes. Do not share this file.
-
-## Run
-
-```bash
-./qoder-proxy serve
-```
-
-Default address:
-
-```text
-127.0.0.1:8080
-```
-
-Override it with either:
-
-```bash
-./qoder-proxy serve --listen 127.0.0.1:9000
-```
-
-or:
-
-```bash
-QODER_PROXY_LISTEN=127.0.0.1:9000 ./qoder-proxy serve
-```
-
-The default loopback bind prevents accidental LAN exposure.
-
-### HTTP compatibility
-
-The local server handles browser CORS preflight (`OPTIONS`) for `/v1/*`. `GET /v1/models` is the OpenAI-standard method; `POST /v1/models` is also accepted for compatibility with clients that probe the model catalogue using POST.
-
-## Logging
-
-Server logs are written to stderr. The default level is `info` and includes server startup, completed HTTP requests, Qoder model refreshes, and Qoder upstream response status.
-
-Use debug logging when diagnosing model mapping or upstream calls:
-
-```bash
-./qoder-proxy serve --log-level debug
-```
-
-Or set it with an environment variable:
-
-```bash
-QODER_PROXY_LOG_LEVEL=debug ./qoder-proxy serve
-```
-
-Supported levels are `debug`, `info`, `warn`, `error`, and `off`. Logs intentionally omit credentials, Authorization headers, and full request bodies.
-
-Example:
+Formal GitHub Releases contain six binaries:
 
 ```text
-time=2026-08-11T14:25:00.000+08:00 level=INFO msg="server started" listen=127.0.0.1:8080 api_key_required=false
-time=2026-08-11T14:25:03.000+08:00 level=INFO msg="qoder models refreshed" models=8 upstream_models=8 duration_ms=241
-time=2026-08-11T14:25:08.000+08:00 level=INFO msg="qoder response" operation=chat model="Claude Sonnet 4" upstream_model=abc123 status=200 duration_ms=312
-time=2026-08-11T14:25:09.000+08:00 level=INFO msg="request completed" method=POST path=/v1/responses status=200 bytes=4210 duration_ms=1276
+qoder-proxy-desktop-windows-amd64.exe
+qoder-proxy-web-windows-amd64.exe
+qoder-proxy-headless-windows-amd64.exe
+qoder-proxy-desktop-linux-amd64
+qoder-proxy-web-linux-amd64
+qoder-proxy-headless-linux-amd64
 ```
 
-### Optional local API key
+Release page:
 
-Set `QODER_PROXY_API_KEY` to require a local API key on generation/model endpoints:
+https://github.com/steamwo/qoder-proxy/releases
+
+## Quick start
+
+### Option A: Web-managed service
+
+Windows:
+
+```powershell
+.\qoder-proxy-web-windows-amd64.exe
+```
+
+Linux:
 
 ```bash
-QODER_PROXY_API_KEY=local-secret ./qoder-proxy serve
+chmod +x ./qoder-proxy-web-linux-amd64
+./qoder-proxy-web-linux-amd64
 ```
 
-OpenAI-compatible clients can use:
+By default it opens:
 
 ```text
-Authorization: Bearer local-secret
+http://127.0.0.1:9000/admin/
 ```
 
-Anthropic-compatible clients can use their normal header:
+The compatible API and admin UI share one listener:
 
 ```text
-x-api-key: local-secret
+http://127.0.0.1:9000/v1/...
+http://127.0.0.1:9000/admin/...
 ```
 
-## Models
+Options:
 
-CLI:
+```text
+--no-browser   do not open the browser on startup
+--shutdown     ask an already running local Web service to exit
+```
+
+Use the admin page for the initial Qoder login. The default setting is `auto_start=true`, so the proxy starts automatically when usable credentials are available.
+
+### Option B: Native desktop app
+
+Windows:
+
+```text
+qoder-proxy-desktop-windows-amd64.exe
+```
+
+Linux:
 
 ```bash
-./qoder-proxy models
+chmod +x ./qoder-proxy-desktop-linux-amd64
+./qoder-proxy-desktop-linux-amd64
 ```
 
-HTTP:
+The desktop app provides:
+
+- Qoder login/logout
+- account identity, plan, quota, and reset information
+- searchable model catalog
+- per-model default context window
+- live model multiplier
+- per-model default reasoning effort
+- proxy start/stop, listen address, and uptime
+- optional local API key
+- free-account queue settings
+- structured logs and event details
+- resolved local data paths
+- Windows notification-area integration / Linux StatusNotifierItem
+
+### Option C: Headless
+
+Headless mode intentionally has no login flow. It is intended for machines that already have a valid local credential:
+
+Windows:
+
+```powershell
+.\qoder-proxy-headless-windows-amd64.exe
+```
+
+Linux:
 
 ```bash
-curl http://127.0.0.1:8080/v1/models
+chmod +x ./qoder-proxy-headless-linux-amd64
+./qoder-proxy-headless-linux-amd64
 ```
 
-Example response:
+The explicit form is also accepted:
 
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "Claude Sonnet 4",
-      "object": "model",
-      "created": 1780000000,
-      "owned_by": "qoder"
-    }
-  ]
-}
+```bash
+./qoder-proxy-headless-linux-amd64 serve
 ```
 
-The `id` above is Qoder's `display_name`, not its internal upstream model key.
+It reads the same credentials and settings as the Web/Desktop apps and starts the compatible API directly.
 
-## Chat Completions
+## Build from source
+
+Go 1.23+ is required.
+
+Headless:
+
+```bash
+go build -trimpath -o dist/qoder-proxy-headless ./cmd/qoder-proxy
+```
+
+Web-managed service:
+
+```bash
+go build -trimpath -o dist/qoder-proxy-web ./cmd/qoder-proxy-service
+```
+
+Native Windows desktop:
+
+```powershell
+./scripts/build-desktop.ps1
+```
+
+Native Linux desktop:
+
+```bash
+./scripts/build-desktop.sh
+```
+
+The Linux desktop build requires the EGL, Vulkan, Wayland, X11 and related development packages used by Gio. See [docs/desktop.md](docs/desktop.md).
+
+## API examples
+
+The examples below use the default `127.0.0.1:9000` address with no local API key configured.
+
+### Models
+
+```bash
+curl http://127.0.0.1:9000/v1/models
+```
+
+The public model ID is Qoder's `display_name`. Internal upstream IDs are not exposed in the public model catalog.
+
+### OpenAI Chat Completions
 
 Non-streaming:
 
 ```bash
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl http://127.0.0.1:9000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "Claude Sonnet 4",
@@ -186,7 +233,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 Streaming:
 
 ```bash
-curl -N http://127.0.0.1:8080/v1/chat/completions \
+curl -N http://127.0.0.1:9000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "Claude Sonnet 4",
@@ -196,11 +243,41 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-The proxy emits standard `chat.completion.chunk` SSE frames followed by `data: [DONE]`.
+### OpenAI Responses
 
-### Thinking / reasoning effort
+```bash
+curl http://127.0.0.1:9000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Claude Sonnet 4",
+    "input": "hello"
+  }'
+```
 
-The proxy does not hard-code which models support thinking effort. It reads each model's live Qoder `thinking_config` and rejects unsupported levels with HTTP 400 instead of silently downgrading them.
+### Anthropic Messages
+
+```bash
+curl http://127.0.0.1:9000/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{
+    "model": "Claude Sonnet 4",
+    "max_tokens": 1024,
+    "messages": [{"role":"user","content":"hello"}]
+  }'
+```
+
+## Reasoning effort
+
+The proxy validates reasoning settings from each model's live `thinking_config`; it does not maintain a static model whitelist.
+
+Common values include:
+
+```text
+none, low, medium, high, xhigh, max
+```
+
+`auto` / `default` means no request-level override. When the model explicitly supports disabling thinking, `off` maps to Qoder `none`.
 
 OpenAI Chat Completions:
 
@@ -233,236 +310,183 @@ Anthropic Messages:
 }
 ```
 
-Accepted effort strings are determined by the Qoder model entry, commonly `low`, `medium`, `high`, `xhigh`, or `max`. `auto`/`default` means no request-level override. `off` is accepted as an alias of Qoder `none` when the model advertises a disabled-thinking mode. A model such as Kimi-K3 that does not advertise effort levels will reject `reasoning_effort`/`reasoning.effort`/`output_config.effort` rather than pretending the setting took effect.
+An explicitly unsupported effort returns HTTP 400. If a model exposes no configurable reasoning depth, generic client hints are not incorrectly forwarded upstream.
 
-On the Qoder wire, the validated value is sent as `parameters.reasoningEffort`. Debug logging includes the selected effort and the effort levels advertised by the model, but never logs prompt content or credentials.
+## Context windows
 
-## Anthropic Messages API
+Available context tiers come from live `context_config`. The Desktop and Web UIs can persist a default context window for a specific upstream model while still allowing request-level behavior to take precedence where supported.
 
-The proxy also exposes Anthropic-compatible Messages at `POST /v1/messages`. The request `model` is still the Qoder `display_name`; the internal Qoder model key is never exposed to the client.
+Capabilities are revalidated against the latest server model metadata instead of relying on a long-lived static table.
 
-Non-streaming:
+## Model multipliers
 
-```bash
-curl http://127.0.0.1:8080/v1/messages \
-  -H 'Content-Type: application/json' \
-  -H 'anthropic-version: 2023-06-01' \
-  -H 'x-api-key: local-secret' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "max_tokens": 1024,
-    "messages": [{"role":"user","content":"hello"}]
-  }'
+The displayed multiplier follows current server model metadata:
+
+1. the base multiplier comes from `price_factor`
+2. a missing `price_factor` is unknown, not zero
+3. `0` is a valid factor and is rendered as `0x`
+4. when `promotion.active=true` and `promotion.discount_factor` exists, the UI prefers the promotional multiplier
+5. multiplier display is informational; qoder-proxy does not modify Qoder billing or routing based on it
+
+Models, multipliers, promotions, and parameters can all change server-side; use the live values returned for the current account.
+
+## Local API key
+
+Configure the optional local API key from Web/Desktop settings. When enabled:
+
+OpenAI clients:
+
+```text
+Authorization: Bearer <local-api-key>
 ```
 
-Streaming:
+Anthropic clients:
 
-```bash
-curl -N http://127.0.0.1:8080/v1/messages \
-  -H 'Content-Type: application/json' \
-  -H 'anthropic-version: 2023-06-01' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "max_tokens": 1024,
-    "stream": true,
-    "messages": [{"role":"user","content":"hello"}]
-  }'
+```text
+x-api-key: <local-api-key>
 ```
 
-Supported Anthropic message features include:
+The local API key protects the compatible API. The browser admin surface is separately restricted to loopback clients.
 
-- string and text-block `system` prompts
-- string and text-block user/assistant content
-- `tools` with `input_schema`
-- assistant `tool_use` history
-- user `tool_result` history
-- streaming `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, and `message_stop` events
-- Anthropic-shaped JSON errors and streaming `error` events
-- Qoder free-account queue retry/heartbeat behavior
-- Qoder no-quota errors mapped to HTTP 429 / Anthropic `rate_limit_error`
+## Qoder queue and quota errors
 
-`anthropic-version` and `anthropic-beta` headers are accepted for client compatibility but are not forwarded to Qoder. Image/document content blocks and Anthropic-native thinking *content blocks* are not currently translated to Qoder. Request-level `output_config.effort` is supported, and `thinking: {"type":"disabled"}` maps to Qoder's `none` mode when the selected model advertises it. `tool_choice`, `temperature`, `top_p`, and stop sequences are accepted by the public request schema, but are not forwarded to Qoder; the upstream request sends `max_tokens` plus the validated `reasoningEffort` override when present.
+### Free-account queue
 
-## Responses API
+When Qoder returns business code `10605` with `isQueued: true` and a suggested `retryAfterSeconds`, the proxy:
 
-Non-streaming:
+- waits according to the upstream recommendation
+- re-signs and retries the request
+- respects the configured retry count and total wait limit
+- emits heartbeats for streaming requests to reduce client idle timeouts
 
-```bash
-curl http://127.0.0.1:8080/v1/responses \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "input": "hello"
-  }'
-```
-
-Streaming:
-
-```bash
-curl -N http://127.0.0.1:8080/v1/responses \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Claude Sonnet 4",
-    "input": "hello",
-    "stream": true
-  }'
-```
-
-The Responses stream emits events such as:
-
-- `response.created`
-- `response.in_progress`
-- `response.output_item.added`
-- `response.content_part.added`
-- `response.output_text.delta`
-- `response.output_text.done`
-- `response.function_call_arguments.delta`
-- `response.function_call_arguments.done`
-- `response.output_item.done`
-- `response.completed`
-
-The external Responses event shape follows the OpenAI Responses streaming contract:
-
-- https://platform.openai.com/docs/api-reference/responses-streaming
-- https://platform.openai.com/docs/api-reference/models
-
-## Function calling
-
-Chat Completions tools are passed to Qoder in OpenAI Chat tool form.
-
-Responses function tools are converted from:
+Default settings:
 
 ```json
 {
-  "type": "function",
-  "name": "get_weather",
-  "description": "Get weather",
-  "parameters": {"type":"object"}
+  "queue_retries": 20,
+  "queue_max_wait": "10m"
 }
 ```
 
-to the Chat-style function tool shape expected by the current Qoder agent endpoint.
+### No quota
 
-Qoder tool-call deltas are converted back to the corresponding Chat Completions or Responses streaming event format.
+Qoder business code `112` maps to HTTP 429 and an OpenAI- or Anthropic-compatible quota error. It is not treated as a queue retry.
 
-Responses input also understands `function_call` and `function_call_output` items for tool-call continuation.
+## Local data
 
-## Other commands
+### Credentials
 
-```bash
-./qoder-proxy status
-./qoder-proxy logout
+- Windows: `%AppData%\qoder-proxy\credentials.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/credentials.json`
+- macOS: `~/Library/Application Support/qoder-proxy/credentials.json`
+
+Override the credential path with:
+
+```text
+QODER_PROXY_CREDENTIALS=/custom/path/credentials.json
 ```
 
-## Environment variables
+The credential file contains access tokens. Do not share it or commit it to version control.
 
-| Variable | Purpose |
-| --- | --- |
-| `QODER_PROXY_LISTEN` | HTTP listen address, default `127.0.0.1:8080` |
-| `QODER_PROXY_API_KEY` | Optional local Bearer API key |
-| `QODER_PROXY_CREDENTIALS` | Override credential JSON path |
-| `QODER_PROXY_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error`, `off` |
-| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Standard Go HTTP proxy environment variables |
+### Settings
+
+- Windows: `%AppData%\qoder-proxy\desktop.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/qoder-proxy/desktop.json`
+
+Typical defaults:
+
+```json
+{
+  "listen": "127.0.0.1:9000",
+  "queue_retries": 20,
+  "queue_max_wait": "10m",
+  "auto_start": true,
+  "minimize_to_tray": true,
+  "tray_notifications": true
+}
+```
+
+The file may also contain the local API key and per-model reasoning/context defaults.
+
+### Logs
+
+- Windows: `%LocalAppData%\qoder-proxy\logs\desktop.log`
+- Linux: `${XDG_CACHE_HOME:-~/.cache}/qoder-proxy/logs/desktop.log`
+
+Persistent logs are bounded to 4 MB. Clear Logs removes both in-memory and on-disk content. Logs contain diagnostic metadata such as paths, status codes, models, and durations, but not credentials, Authorization headers, or complete request bodies.
+
+## Security boundaries
+
+- default listener: `127.0.0.1:9000`
+- if you expose the API to a LAN, configure a local API key and apply your own network controls
+- `/admin/*` remains loopback-only even when the API listener is non-loopback
+- credentials and settings use user-private permissions where the operating system supports them
+- do not upload credential, settings, or log files to untrusted third parties
+
+## CI and releases
+
+`.github/workflows/build.yml` runs for:
+
+- pushes to `main`
+- pull requests targeting `main`
+- manual `workflow_dispatch`
+- `v*` tags
+
+Quality gates:
+
+```text
+go test ./...
+go vet ./...
+```
+
+Pull requests build Windows/Linux Web and Headless binaries for validation. Formal releases additionally build the native Desktop binaries.
+
+A formal release can be triggered by:
+
+- pushing a semver-compatible `v*` tag
+- pushing a commit to `main` whose first commit-message line is `release: vX.Y.Z`
+
+The workflow creates a draft GitHub Release, uploads Desktop/Web/Headless binaries for Windows and Linux, and publishes it as latest only after all required builds succeed.
+
+## Repository layout
+
+```text
+cmd/qoder-proxy            Headless entry point
+cmd/qoder-proxy-service    Browser-managed service entry point
+cmd/qoder-proxy-desktop    Native Gio desktop entry point
+internal/credential        Qoder credential persistence
+internal/qoder             Login, refresh, signing, models, quota, streaming
+internal/protocol          Provider-neutral request/event types
+internal/openai            Chat Completions / Responses adapters
+internal/anthropic         Anthropic Messages adapter
+internal/server            Compatible API routes and local authentication
+internal/desktop           Desktop/Web service, settings, logs, tray
+assets                     Branding assets
+scripts                    Desktop build scripts
+```
+
+More documentation:
+
+- [Desktop build and local data](docs/desktop.md)
+- [Architecture](docs/architecture.md)
+- [Design notes](docs/design.md)
 
 ## Current scope
 
-The first version focuses on the local single-account use case:
+The project currently focuses on a local single-account compatibility proxy:
 
 - one Qoder credential
-- Qoder PKCE device login
+- Qoder PKCE login and token refresh
 - COSY request signing
-- Qoder model discovery with a five-minute in-memory cache
-- public `display_name` / private upstream model ID mapping
+- multi-server-scene model discovery and caching
+- public `display_name` / private upstream model-ID mapping
+- live context and reasoning capabilities
+- live model multiplier display
 - text input/output
-- function calling
-- OpenAI Chat Completions and Responses streaming/non-streaming output
+- Function Calling / Tool Use
+- OpenAI Chat Completions / Responses
+- Anthropic Messages
+- streaming and non-streaming compatibility
+- local Web / Desktop / Headless runtimes
 
-Cloudflare Workers, D1, KV, account pools, multi-provider routing, gateway quotas, and admin UI are intentionally not part of this project.
-
-Multimodal Responses input is not translated in the MVP; text content is supported.
-
-
-## Qoder no-quota errors
-
-Qoder business error `112` is treated as an exhausted/unavailable account quota.
-The proxy does not retry it. If it is the first upstream SSE event, the proxy
-returns an OpenAI-style JSON error before starting the local SSE response:
-
-```http
-HTTP/1.1 429 Too Many Requests
-Content-Type: application/json
-```
-
-```json
-{
-  "error": {
-    "message": "Qoder account has no available quota for this request. Pricing: https://qoder.com/pricing?client=qoder",
-    "type": "insufficient_quota",
-    "code": "insufficient_quota"
-  }
-}
-```
-
-This is separate from Qoder queue code `10605`, which remains automatically
-retryable according to the queue settings below.
-
-## Qoder free-account queue handling
-
-Qoder may put free-tier requests into a slow queue and return a business-layer
-403 envelope with code `10605`, `isQueued: true`, and a suggested
-`retryAfterSeconds` value even though the HTTP response itself is 200.
-
-qoder-proxy detects this condition before exposing it as an OpenAI error. It
-waits for the server-provided retry interval and reissues a freshly signed
-Qoder request. For streaming `/v1/chat/completions`, the proxy emits SSE comment
-heartbeats while queued so browser/client idle timers do not treat the local
-connection as dead.
-
-Defaults:
-
-```text
---queue-retries 20
---queue-max-wait 10m
-```
-
-Environment equivalents:
-
-```text
-QODER_PROXY_QUEUE_RETRIES=20
-QODER_PROXY_QUEUE_MAX_WAIT=10m
-```
-
-Set `--queue-retries 0` to disable automatic queue retries.
-
-
-## Desktop UI refresh
-
-The Gio desktop client uses a light, Apple-inspired native visual system: generous spacing, cool gray surfaces, restrained blue/mint status colors, rounded elevated panels, and a status-first information hierarchy. Five dedicated areas cover Dashboard, account quota, models, structured logs, and settings. The UI remains native Gio and does not use WebView.
-
-## Desktop app (Gio, no WebView)
-
-Version `0.3.2-desktop` adds an optional native-rendered Gio desktop application while keeping the CLI intact.
-
-```text
-cmd/qoder-proxy            CLI
-cmd/qoder-proxy-desktop    Gio desktop app
-internal/...               shared proxy/Qoder implementation
-```
-
-The desktop app provides Qoder login/logout, account quota, searchable model capabilities, proxy start/stop with uptime, bounded persistent searchable logs with detail selection, grouped settings, a Data & Privacy view that reveals actual local paths, and platform tray integration. Windows uses a Win32 notification-area menu with open/start-stop/refresh/quit actions; Linux uses StatusNotifierItem over D-Bus with activate-to-open and secondary-activate-to-toggle behavior.
-
-Qoder quota is fetched with the logged-in Bearer token from `https://openapi.qoder.sh/api/v2/quota/usage`. The UI recognizes personal quota (`userQuota`), organization resources (`orgResourcePackage`), plan/subscription labels, percentages, and quota expiry/reset timestamps.
-
-Build instructions are in [`docs/desktop.md`](docs/desktop.md). On a normal development machine with Go module network access:
-
-```powershell
-./scripts/build-desktop.ps1
-
-The desktop build script runs `go mod tidy` first to generate/update `go.sum`, and aborts on any failed Go command.
-```
-
-or on Linux:
-
-```bash
-./scripts/build-desktop.sh
-```
+Account pools, multi-provider routing, Cloudflare Workers, D1, KV, and public gateway administration are outside the current project scope.
