@@ -84,10 +84,10 @@ https://github.com/steamwo/qoder-proxy/releases
 
 ### 方案 A：Web 管理服务
 
-Windows：
+Windows 直接运行：
 
-```powershell
-.\qoder-proxy-web-windows-amd64.exe
+```text
+qoder-proxy-web-windows-amd64.exe
 ```
 
 Linux：
