@@ -151,7 +151,7 @@ jobs:
           echo "pr_tag=$pr_tag" >> "$GITHUB_OUTPUT"
 
   windows:
-    name: Build Windows server and headless
+    name: Build Windows web and headless
     runs-on: windows-latest
     needs: [quality, release-context]
     permissions:
@@ -174,11 +174,6 @@ jobs:
         shell: pwsh
         run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-windows-amd64.exe ./cmd/qoder-proxy
 
-      - name: Build Desktop executable for release
-        if: needs.release-context.outputs.is_release == 'true'
-        shell: pwsh
-        run: ./scripts/build-desktop.ps1
-
       - name: Upload Windows binaries to PR build release
         if: github.event_name == 'pull_request'
         env:
@@ -199,17 +194,20 @@ jobs:
         shell: pwsh
         run: |
           gh release upload "$env:RELEASE_TAG" -R "$env:GITHUB_REPOSITORY" `
-            dist/qoder-proxy-desktop-windows-amd64.exe `
             dist/qoder-proxy-web-windows-amd64.exe `
             dist/qoder-proxy-headless-windows-amd64.exe `
             --clobber
 
   linux:
-    name: Build Linux server and headless
+    name: Build static Linux web and headless
     runs-on: ubuntu-latest
     needs: [quality, release-context]
     permissions:
       contents: write
+    env:
+      CGO_ENABLED: "0"
+      GOOS: linux
+      GOARCH: amd64
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -226,21 +224,20 @@ jobs:
       - name: Build Headless executable
         run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-linux-amd64 ./cmd/qoder-proxy
 
-      - name: Install Gio desktop dependencies for release
-        if: needs.release-context.outputs.is_release == 'true'
+      - name: Verify Linux binaries have no dynamic loader
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc pkg-config \
-            libegl1-mesa-dev libgles2-mesa-dev \
-            libvulkan-dev \
-            libwayland-dev libx11-dev libx11-xcb-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev \
-            libxcursor-dev libxfixes-dev
-
-      - name: Build Desktop executable for release
-        if: needs.release-context.outputs.is_release == 'true'
-        run: ./scripts/build-desktop.sh
+          set -euo pipefail
+          for bin in \
+            dist/qoder-proxy-web-linux-amd64 \
+            dist/qoder-proxy-headless-linux-amd64; do
+            file "$bin"
+            if readelf -l "$bin" | grep -q 'INTERP'; then
+              echo "::error file=$bin::$bin contains an ELF interpreter and is not fully static"
+              readelf -l "$bin"
+              exit 1
+            fi
+          done
 
       - name: Upload Linux binaries to PR build release
         if: github.event_name == 'pull_request'
@@ -260,7 +257,6 @@ jobs:
           RELEASE_TAG: ${{ needs.release-context.outputs.tag }}
         run: |
           gh release upload "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
-            dist/qoder-proxy-desktop-linux-amd64 \
             dist/qoder-proxy-web-linux-amd64 \
             dist/qoder-proxy-headless-linux-amd64 \
             --clobber
