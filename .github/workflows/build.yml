@@ -221,10 +221,33 @@ jobs:
           cache: true
 
       - name: Build Web Server executable
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
         run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-web-linux-amd64 ./cmd/qoder-proxy-service
 
       - name: Build Headless executable
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
         run: go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-linux-amd64 ./cmd/qoder-proxy
+
+      - name: Verify Web and Headless binaries are static
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in \
+            dist/qoder-proxy-web-linux-amd64 \
+            dist/qoder-proxy-headless-linux-amd64; do
+            file "$bin"
+            if readelf -l "$bin" | grep -q 'INTERP'; then
+              echo "::error file=$bin::$bin contains an ELF interpreter and is not fully static"
+              readelf -l "$bin"
+              exit 1
+            fi
+          done
 
       - name: Install Gio desktop dependencies for release
         if: needs.release-context.outputs.is_release == 'true'
