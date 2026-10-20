@@ -2,7 +2,7 @@
 
 [简体中文](README.md) · [English](README_EN.md)
 
-A Go proxy that connects a Qoder account to local OpenAI- and Anthropic-compatible APIs. The project ships three front ends over the same credential, settings, model registry, and proxy core: a lightweight browser-managed service, a native Gio desktop app, and a headless service.
+A Go proxy that connects a Qoder account to local OpenAI- and Anthropic-compatible APIs. The project currently ships a lightweight browser-managed service and a headless service over the same credential, settings, model registry, and proxy core. The legacy Gio desktop source is still kept in the repository for now, but CI no longer builds or publishes it.
 
 > The default listen address is `127.0.0.1:9000`. The `/admin/*` management surface is restricted to loopback clients even if you intentionally expose the compatible API on a LAN address.
 
@@ -44,18 +44,17 @@ Model behavior is discovered from the current Qoder account instead of being har
 - read context-window choices from live `context_config`
 - read reasoning levels from live `thinking_config`
 - treat `price_factor` as optional model metadata
-- when an active promotion provides `promotion.discount_factor`, show that as the current multiplier in the desktop/browser model table
+- when an active promotion provides `promotion.discount_factor`, show that as the current multiplier in the browser model table
 - show `—` when no factor is supplied, while preserving a valid `0x` factor
 
-### Three runtime modes
+### Two runtime modes
 
 | Entry point | Best for | Login / management |
 | --- | --- | --- |
 | `qoder-proxy-web-*` | Lightweight local service and browser management | Built-in `/admin/` UI for login, quota, models, logs, and settings |
-| `qoder-proxy-desktop-*` | Daily desktop use | Native Gio UI, no WebView, tray integration and full local controls |
-| `qoder-proxy-headless-*` | Servers and low-overhead environments | No login UI; expects credentials created by the Web or Desktop app |
+| `qoder-proxy-headless-*` | Servers and low-overhead environments | No login UI; expects credentials created by the Web service |
 
-All three modes share:
+Both modes share:
 
 - the Qoder credential file
 - `desktop.json`
@@ -66,16 +65,16 @@ All three modes share:
 
 ## Downloads
 
-Formal GitHub Releases contain six binaries:
+Formal GitHub Releases contain four binaries:
 
 ```text
-qoder-proxy-desktop-windows-amd64.exe
 qoder-proxy-web-windows-amd64.exe
 qoder-proxy-headless-windows-amd64.exe
-qoder-proxy-desktop-linux-amd64
 qoder-proxy-web-linux-amd64
 qoder-proxy-headless-linux-amd64
 ```
+
+Linux release binaries are built with `CGO_ENABLED=0`. CI also checks that the ELF files contain no dynamic interpreter, so they do not require the target system to provide the same glibc version as the build runner.
 
 Release page:
 
@@ -120,37 +119,7 @@ Options:
 
 Use the admin page for the initial Qoder login. The default setting is `auto_start=true`, so the proxy starts automatically when usable credentials are available.
 
-### Option B: Native desktop app
-
-Windows:
-
-```text
-qoder-proxy-desktop-windows-amd64.exe
-```
-
-Linux:
-
-```bash
-chmod +x ./qoder-proxy-desktop-linux-amd64
-./qoder-proxy-desktop-linux-amd64
-```
-
-The desktop app provides:
-
-- Qoder login/logout
-- account identity, plan, quota, and reset information
-- searchable model catalog
-- per-model default context window
-- live model multiplier
-- per-model default reasoning effort
-- proxy start/stop, listen address, and uptime
-- optional local API key
-- free-account queue settings
-- structured logs and event details
-- resolved local data paths
-- Windows notification-area integration / Linux StatusNotifierItem
-
-### Option C: Headless
+### Option B: Headless
 
 Headless mode intentionally has no login flow. It is intended for machines that already have a valid local credential:
 
@@ -173,37 +142,27 @@ The explicit form is also accepted:
 ./qoder-proxy-headless-linux-amd64 serve
 ```
 
-It reads the same credentials and settings as the Web/Desktop apps and starts the compatible API directly.
+It reads the same credentials and settings as the Web service and starts the compatible API directly.
 
 ## Build from source
 
 Go 1.23+ is required.
 
-Headless:
+Static Linux Headless build:
 
 ```bash
-go build -trimpath -o dist/qoder-proxy-headless ./cmd/qoder-proxy
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-headless-linux-amd64 ./cmd/qoder-proxy
 ```
 
-Web-managed service:
+Static Linux Web-managed service build:
 
 ```bash
-go build -trimpath -o dist/qoder-proxy-web ./cmd/qoder-proxy-service
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o dist/qoder-proxy-web-linux-amd64 ./cmd/qoder-proxy-service
 ```
 
-Native Windows desktop:
-
-```powershell
-./scripts/build-desktop.ps1
-```
-
-Native Linux desktop:
-
-```bash
-./scripts/build-desktop.sh
-```
-
-The Linux desktop build requires the EGL, Vulkan, Wayland, X11 and related development packages used by Gio. See [docs/desktop.md](docs/desktop.md).
+Other targets can be built with the corresponding Go target settings. The legacy desktop source remains in the repository for now, but is outside the release build.
 
 ## API examples
 
@@ -314,7 +273,7 @@ An explicitly unsupported effort returns HTTP 400. If a model exposes no configu
 
 ## Context windows
 
-Available context tiers come from live `context_config`. The Desktop and Web UIs can persist a default context window for a specific upstream model while still allowing request-level behavior to take precedence where supported.
+Available context tiers come from live `context_config`. The Web UI can persist a default context window for a specific upstream model while still allowing request-level behavior to take precedence where supported.
 
 Capabilities are revalidated against the latest server model metadata instead of relying on a long-lived static table.
 
@@ -332,7 +291,7 @@ Models, multipliers, promotions, and parameters can all change server-side; use 
 
 ## Local API key
 
-Configure the optional local API key from Web/Desktop settings. When enabled:
+Configure the optional local API key from Web settings. When enabled:
 
 OpenAI clients:
 
@@ -406,14 +365,14 @@ Typical defaults:
 }
 ```
 
-The file may also contain the local API key and per-model reasoning/context defaults.
+The file may also contain the local API key and per-model reasoning/context defaults. The existing `desktop.json` filename is kept for compatibility.
 
 ### Logs
 
 - Windows: `%LocalAppData%\qoder-proxy\logs\desktop.log`
 - Linux: `${XDG_CACHE_HOME:-~/.cache}/qoder-proxy/logs/desktop.log`
 
-Persistent logs are bounded to 4 MB. Clear Logs removes both in-memory and on-disk content. Logs contain diagnostic metadata such as paths, status codes, models, and durations, but not credentials, Authorization headers, or complete request bodies.
+Persistent logs are bounded to 4 MB. Clear Logs removes both in-memory and on-disk content. Logs contain diagnostic metadata such as paths, status codes, models, and durations, but not credentials, Authorization headers, or complete request bodies. The existing `desktop.log` filename is kept for compatibility.
 
 ## Security boundaries
 
@@ -439,35 +398,35 @@ go test ./...
 go vet ./...
 ```
 
-Pull requests build Windows/Linux Web and Headless binaries for validation. Formal releases additionally build the native Desktop binaries.
+Pull requests and formal releases build only Windows/Linux Web and Headless binaries. Linux builds use `CGO_ENABLED=0`, and CI checks with `readelf` that the binaries have no ELF `INTERP` segment so future changes cannot silently reintroduce a glibc dynamic dependency.
 
 A formal release can be triggered by:
 
 - pushing a semver-compatible `v*` tag
 - pushing a commit to `main` whose first commit-message line is `release: vX.Y.Z`
 
-The workflow creates a draft GitHub Release, uploads Desktop/Web/Headless binaries for Windows and Linux, and publishes it as latest only after all required builds succeed.
+The workflow creates a draft GitHub Release, uploads Web/Headless binaries for Windows and Linux, and publishes it as latest only after all required builds succeed.
 
 ## Repository layout
 
 ```text
 cmd/qoder-proxy            Headless entry point
 cmd/qoder-proxy-service    Browser-managed service entry point
-cmd/qoder-proxy-desktop    Native Gio desktop entry point
+cmd/qoder-proxy-desktop    Legacy Gio desktop source (not published by CI)
 internal/credential        Qoder credential persistence
 internal/qoder             Login, refresh, signing, models, quota, streaming
 internal/protocol          Provider-neutral request/event types
 internal/openai            Chat Completions / Responses adapters
 internal/anthropic         Anthropic Messages adapter
 internal/server            Compatible API routes and local authentication
-internal/desktop           Desktop/Web service, settings, logs, tray
+internal/desktop           Web service, settings, logs, and legacy shared desktop code
 assets                     Branding assets
-scripts                    Desktop build scripts
+scripts                    Legacy desktop build helpers
 ```
 
 More documentation:
 
-- [Desktop build and local data](docs/desktop.md)
+- [Legacy desktop build and local data](docs/desktop.md)
 - [Architecture](docs/architecture.md)
 - [Design notes](docs/design.md)
 
@@ -487,6 +446,6 @@ The project currently focuses on a local single-account compatibility proxy:
 - OpenAI Chat Completions / Responses
 - Anthropic Messages
 - streaming and non-streaming compatibility
-- local Web / Desktop / Headless runtimes
+- local Web / Headless release runtimes
 
 Account pools, multi-provider routing, Cloudflare Workers, D1, KV, and public gateway administration are outside the current project scope.
