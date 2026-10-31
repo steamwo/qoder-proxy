@@ -231,10 +231,12 @@ func (c *Client) doChatAttempt(ctx context.Context, req protocol.Request, sessio
 	if tools == nil {
 		tools = []any{}
 	}
-	messages := req.Messages
+	messages := trimMessageImages(req.Messages, maxQoderHistoryImages)
+	identityReq := req
+	identityReq.Messages = messages
 	allImages := messageImageURLs(messages)
 	topLevelImages := latestUserImageURLs(messages)
-	requestSetID := requestSetIDForRequest(req, sessionID)
+	requestSetID := requestSetIDForRequest(identityReq, sessionID)
 	chatRecordID := stableHash("qoder-chat-record", sessionID, req.ModelID, messages, tools, maxTokens, req.ReasoningEffort, req.ContextWindow)
 	requestID, _ := randomUUID()
 	businessID, _ := randomUUID()
